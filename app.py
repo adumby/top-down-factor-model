@@ -11,8 +11,17 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+# Force-reload the project's own modules on every run, so newly uploaded config.py / data.py
+# are always picked up (Streamlit Cloud can otherwise keep the old versions in memory).
+import importlib
+import config as _config
 import charts as C
 import data as D
+import model as _model
+import portfolio as _portfolio
+for _m in (_config, C, D, _model, _portfolio):
+    importlib.reload(_m)
+
 from config import (ASSETS, ASSET_BY_TICKER, CASH, EPISODES, FACTOR_BY_KEY, FACTOR_KEYS, FACTORS,
                     PRESETS, TICKERS, VIEW_NOTES, VIEWS)
 from model import factor_diagnostics, fit_models
