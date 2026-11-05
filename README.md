@@ -102,3 +102,12 @@ shelter and demand stay at their recent trend, so read them as the oil part of t
 
 The CPI move in each 12-month oil view (Stress test / Forecast) is now taken from this model instead of
 judgment. Extra FRED series: DCOILBRENTEU, PCEPI, PCEPILFE, CPILFESL (strict mode applies to them too).
+
+### Fed / yield links
+The 2y yield (Fed path), 10y real yield and 10y breakeven are each regressed, over overlapping 12-month
+windows, on the 12-month change in core PCE inflation (y/y) and the 12-month % change in Brent
+(Newey-West(12) errors; for the 2y and real yield, windows starting with the 2y below 0.5% are dropped
+because the Fed couldn't cut at the zero bound). For each oil view, the inflation module projects core PCE,
+and these slopes turn that into the 2y, real-yield and breakeven moves the Stress test and Forecast use.
+Note: core inflation drifts back toward its 2006-2026 average in every path, so all views share some
+"baseline" easing; the Inflation tab shows a Brent-flat baseline so you can see the part due to oil.

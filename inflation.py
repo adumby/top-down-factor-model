@@ -218,3 +218,66 @@ def cpi_view_value(pt_cpi: PassThrough, path, months: int = 12, hist_mean_mm: fl
     total = float(r["head_mm"].loc[fut].sum())
     avg = hist_mean_mm if hist_mean_mm is not None else float(pt_cpi.head_mm.mean())
     return total - avg * len(fut)
+
+
+# --------------------------------------------------------------------------- #
+# Fed / yield links: how the 2y, the 10y real yield and the 10y breakeven move over 12 months,
+# given the 12-month change in core inflation (y/y) and the 12-month % change in Brent.
+#   dY_{t-12..t} = a + b_core * d(core y/y)_{t-12..t} + b_oil * 100*ln(Brent_t / Brent_{t-12}) + e
+# Overlapping 12m windows -> Newey-West(12). For the 2y and real yield, windows that start with the
+# 2y below 0.5% are dropped: at the zero bound the Fed couldn't cut, which would hide the reaction.
+# Only the slopes are used for scenarios (the constant is sample drift).
+# --------------------------------------------------------------------------- #
+LINK_TARGETS = {"FED_EXPECT": ("Y2", "2y Treasury (Fed path)"),
+                "REAL_YIELD": ("REAL10", "10y real yield (TIPS)"),
+                "BREAKEVEN": ("BE10", "10y breakeven")}
+
+
+def yoy_from_mm(mm: pd.Series) -> pd.Series:
+    return 100.0 * (np.exp(mm.rolling(12).sum() / 100.0) - 1.0)
+
+
+@dataclass
+class YieldLinks:
+    fits: dict          # factor key -> statsmodels results
+    start: pd.Period
+    end: pd.Period
+    zlb_dropped: int
+
+
+def fit_links(levels: pd.DataFrame, pt: PassThrough, zlb: float = 0.5) -> YieldLinks | None:
+    if not all(c in levels.columns for c, _ in LINK_TARGETS.values()):
+        return None
+    core_yoy = yoy_from_mm(pt.core_mm)
+    X = pd.DataFrame({"core inflation chg (pp)": core_yoy.diff(12),
+                      "oil chg (%)": 100.0 * np.log(levels["BRENT"]).diff(12)})
+    fits, starts, ends, dropped = {}, [], [], 0
+    for key, (col, _) in LINK_TARGETS.items():
+        y = levels[col].diff(12).rename("y")
+        df = pd.concat([y, X], axis=1).dropna()
+        if key in ("FED_EXPECT", "REAL_YIELD"):
+            at_zlb = (levels["Y2"].shift(12) < zlb).reindex(df.index).fillna(False)
+            dropped = int(at_zlb.sum())
+            df = df.loc[~at_zlb]
+        fits[key] = sm.OLS(df["y"], sm.add_constant(df[list(X.columns)])).fit(
+            cov_type="HAC", cov_kwds={"maxlags": 12})
+        starts.append(df.index[0]); ends.append(df.index[-1])
+    return YieldLinks(fits, min(starts), max(ends), dropped)
+
+
+def scenario_drivers(pt_core_family: PassThrough, path, last_brent: float, months: int = 12) -> dict:
+    """12-month change in core y/y inflation and Brent % change implied by an oil path."""
+    r = project(pt_core_family, path)
+    fut = r["path_index"]
+    before = fut[0] - 1
+    dcore = float(r["core_yoy"].loc[fut[months - 1]] - r["core_yoy"].loc[before])
+    dhead = float(r["head_yoy"].loc[fut[months - 1]] - r["head_yoy"].loc[before])
+    oil = float(100.0 * np.log(np.asarray(path, float)[months - 1] / last_brent))
+    return {"core inflation chg (pp)": dcore, "headline inflation chg (pp)": dhead, "oil chg (%)": oil}
+
+
+def link_view_values(links: YieldLinks, drivers: dict) -> dict[str, float]:
+    out = {}
+    for key, res in links.fits.items():
+        out[key] = float(sum(res.params[c] * drivers[c] for c in ("core inflation chg (pp)", "oil chg (%)")))
+    return out

@@ -113,7 +113,9 @@ def get_inflation(src: str, signature: tuple, _ds: D.Dataset):
     L = _ds.levels
     if L is None:
         return None
-    return {fam: INF.fit(L["BRENT"], L[f"{fam}_H"], L[f"{fam}_C"], fam) for fam in ("PCE", "CPI")}
+    out = {fam: INF.fit(L["BRENT"], L[f"{fam}_H"], L[f"{fam}_C"], fam) for fam in ("PCE", "CPI")}
+    out["links"] = INF.fit_links(L, out["PCE"])        # Fed/yield reaction, driven by core PCE
+    return out
 
 
 INFL = get_inflation(SRC, SIGNATURE, ds)
@@ -121,19 +123,28 @@ LAST_BRENT = float(ds.levels["BRENT"].dropna().iloc[-1]) if ds.levels is not Non
 
 
 def calibrate_views():
-    """Replace the judgment-based CPI value in each 12m view with the pass-through model's projection."""
+    """Replace judgment with model output in each 12m view: CPI from the pass-through model; the 2y,
+    10y real yield and 10y breakeven from the estimated Fed/yield links. Returns (views, drivers)."""
     out = {k: dict(v) for k, v in VIEWS.items()}
-    if INFL is None or "CPI" not in ds.factors.columns:
-        return out
+    drivers = {}
+    if INFL is None:
+        return out, drivers
     avg = float(INFL["CPI"].head_mm.loc[est_start:].mean())   # same series and window as the CPI factor
     for name, path in INF.view_paths(LAST_BRENT).items():
-        if name in out:
-            out[name]["CPI"] = round(INF.cpi_view_value(INFL["CPI"], path, hist_mean_mm=avg), 2)
-    return out
+        if name not in out:
+            continue
+        out[name]["CPI"] = round(INF.cpi_view_value(INFL["CPI"], path, hist_mean_mm=avg), 2)
+        if INFL.get("links") is not None:
+            dr = INF.scenario_drivers(INFL["PCE"], path, LAST_BRENT)
+            drivers[name] = dr
+            for k, v in INF.link_view_values(INFL["links"], dr).items():
+                out[name][k] = round(v, 2)
+    return out, drivers
 
 
-VIEWS_LIVE = calibrate_views()
-CPI_NOTE = (" CPI move comes from the pass-through model (Inflation tab)." if INFL is not None else "")
+VIEWS_LIVE, VIEW_DRIVERS = calibrate_views()
+CPI_NOTE = (" CPI, 2y, real-yield and breakeven moves come from the models in the Inflation tab; the "
+            "other factors are judgment." if INFL is not None else "")
 
 for n in ds.notes:
     st.sidebar.warning(n)
@@ -677,7 +688,7 @@ with tabs[5]:
         # ---- 2. scenario paths
         st.subheader(f"{fam} inflation under each oil path")
         H = 18
-        paths = INF.view_paths(LAST_BRENT, months=H)
+        paths = {"Brent flat at today's level (baseline)": np.full(H, LAST_BRENT), **INF.view_paths(LAST_BRENT, months=H)}
         with st.expander("Add a custom oil path"):
             cc1, cc2, cc3 = st.columns(3)
             use_custom = cc1.checkbox("Include custom path", value=False)
@@ -686,7 +697,13 @@ with tabs[5]:
             if use_custom:
                 paths[f"Custom: ${tgt:.0f} in {ramp}m, then holds"] = INF.custom_path(LAST_BRENT, tgt, ramp, H)
         sel = st.multiselect("Paths", list(paths), default=list(paths))
-        pal = {n: c for n, c in zip(paths, [C.SERIES[3], C.SERIES[2], C.SERIES[6], C.SERIES[4]])}
+        pc_ = pt.core.params
+        if 0 < pc_["trend"] < 1:
+            lr = 100 * (np.exp(12 * pc_["const"] / (1 - pc_["trend"]) / 100) - 1)
+            st.caption(f"Core {fam} drifts back toward about **{lr:.1f}%** (its 2006-2026 average pace) in every "
+                       "path, even with oil flat. Compare each path with the grey baseline to see the part "
+                       "that is down to oil.")
+        pal = {n: c for n, c in zip(paths, [C.MUTED, C.SERIES[3], C.SERIES[2], C.SERIES[6], C.SERIES[4]])}
 
         @st.cache_data(show_spinner=False)
         def _proj(src, signature, fam_, path_tuple):
@@ -747,16 +764,48 @@ with tabs[5]:
                    "Only oil drives these paths: wages, shelter, tariffs and demand are held at their recent trend, "
                    "so treat them as the oil part of the inflation outlook, not a full forecast.")
 
-        # ---- 3. link to factor-model views
+        # ---- 3. Fed / yield reaction
+        st.subheader("How the Fed and yields react")
+        lk = INFL.get("links")
+        if lk is None:
+            st.info("Yield data not loaded.")
+        else:
+            st.markdown("Estimated from 12-month windows, "
+                        f"{lk.start.strftime('%b %Y')} to {lk.end.strftime('%b %Y')}: how much each yield moved "
+                        "for a 1pp change in **core PCE** (y/y) and a 1% move in Brent over the same 12 months. "
+                        f"For the 2y and real yield, {lk.zlb_dropped} windows that started at the zero bound are "
+                        "left out, because the Fed couldn't cut there.")
+            rows = []
+            for key, res in lk.fits.items():
+                rows.append({"Yield": INF.LINK_TARGETS[key][1],
+                             "per 1pp core inflation": res.params["core inflation chg (pp)"],
+                             "t-stat (core)": res.tvalues["core inflation chg (pp)"],
+                             "per 10% oil move": 10 * res.params["oil chg (%)"],
+                             "t-stat (oil)": res.tvalues["oil chg (%)"],
+                             "R²": res.rsquared, "windows": int(res.nobs)})
+            st.dataframe(pd.DataFrame(rows).set_index("Yield").style.format(
+                {"per 1pp core inflation": "{:+.2f} pp", "t-stat (core)": "{:+.1f}", "per 10% oil move": "{:+.2f} pp",
+                 "t-stat (oil)": "{:+.1f}", "R²": "{:.2f}", "windows": "{:.0f}"}), width="stretch")
+            st.caption("t-stats above about 2 mean the link is reliable. Windows overlap, so Newey-West(12) "
+                       "standard errors are used.")
+
+        # ---- 4. link to factor-model views
         st.subheader("What this feeds into the 12-month views")
         rows = []
         for n in VIEWS:
-            rows.append({"View": n, "CPI move: my original judgment": VIEWS[n].get("CPI", np.nan),
-                         "CPI move: pass-through model (used now)": VIEWS_LIVE[n].get("CPI", np.nan)})
+            row = {"View": n}
+            dr = VIEW_DRIVERS.get(n, {})
+            if dr:
+                row["Core PCE chg (pp)"] = dr["core inflation chg (pp)"]
+                row["Brent chg (%)"] = dr["oil chg (%)"]
+            for k, lbl in (("CPI", "CPI"), ("FED_EXPECT", "2y"), ("REAL_YIELD", "Real yield"), ("BREAKEVEN", "Breakeven")):
+                row[f"{lbl}: judgment"] = VIEWS[n].get(k, np.nan)
+                row[f"{lbl}: model"] = VIEWS_LIVE[n].get(k, np.nan)
+            rows.append(row)
         st.dataframe(pd.DataFrame(rows).set_index("View").style.format("{:+.2f}"), width="stretch")
-        st.caption("CPI factor = projected 12-month CPI inflation minus its historical average pace, in pp. "
-                   "The Stress test and Forecast tabs now use the model's number. Other factor moves in the "
-                   "views (2y, real yields, breakevens...) are still judgment.")
+        st.caption("All in pp over 12 months (CPI = projected inflation minus its historical average pace). The "
+                   "Stress test and Forecast tabs now use the model columns. Credit, VIX, dollar, growth, copper, "
+                   "term premium and mortgage spread are still judgment.")
 
 # --------------------------------------------------------------------------- #
 # Diagnostics

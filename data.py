@@ -21,6 +21,7 @@ from config import (ASSETS, CASH, FACTOR_KEYS, FACTORS, FRED_IDS, INFLATION_SERI
 
 CACHE_DIR = Path(__file__).parent / "data_cache"
 START = "2003-12-01"
+YIELD_LEVELS = {"Y2": "DGS2", "REAL10": "DFII10", "BE10": "T10YIE"}
 
 
 @dataclass
@@ -73,6 +74,9 @@ def build_levels(raw: dict[str, pd.Series]) -> pd.DataFrame:
         b.index = pd.to_datetime(b.index)
         out["BRENT"] = b.groupby(b.index.to_period("M")).mean()
     for key, (sid, _) in INFLATION_SERIES.items():
+        if sid in raw:
+            out[key] = to_monthly_last(raw[sid])
+    for key, sid in YIELD_LEVELS.items():          # month-end yield levels for the Fed/yield links
         if sid in raw:
             out[key] = to_monthly_last(raw[sid])
     return pd.DataFrame(out)
@@ -320,6 +324,12 @@ DEMO_PT = {
 }
 
 
+# Known 12m yield responses (pp per 1pp change in core y/y inflation, and per 1% oil move)
+DEMO_LINKS = {"FED_EXPECT": {"core": 0.8, "oil": 0.004},
+              "REAL_YIELD": {"core": 0.5, "oil": -0.002},
+              "BREAKEVEN": {"core": 0.3, "oil": 0.006}}
+
+
 def make_demo_levels(seed: int = 7, start: str = "2007-01", end: str = "2026-10",
                      pre: int = 36) -> pd.DataFrame:
     """Brent: mean-reverting log price with occasional spikes. Inflation: generated from DEMO_PT."""
@@ -344,10 +354,18 @@ def make_demo_levels(seed: int = 7, start: str = "2007-01", end: str = "2026-10"
         xh = head_design(cm, d, N).loc[t]
         hm.iloc[i] = ph["const"] + sum(ph[k] * xh[k] for k in ph if k != "const") + rng.normal(0, DEMO_PT["head_sd"])
     lvl = lambda m: 100.0 * np.exp(m.cumsum() / 100.0)
+    # yields respond to the change in core inflation (y/y) and to oil: known slopes, for validation
+    dcore_m = cm.rolling(12).sum().diff().fillna(0)
+    lk = DEMO_LINKS
+    def walk(start_lvl, key, sd):
+        e = rng.normal(0, sd, n)
+        steps = lk[key]["core"] * dcore_m.to_numpy() + lk[key]["oil"] * d.to_numpy() + e
+        return pd.Series(start_lvl + np.cumsum(steps), index=idx)
+    y2, real10, be10 = walk(2.5, "FED_EXPECT", 0.15), walk(1.0, "REAL_YIELD", 0.12), walk(2.2, "BREAKEVEN", 0.06)
     cpi_h = hm * 1.15 + rng.normal(0, 0.04, n)
     cpi_c = cm * 1.12 + rng.normal(0, 0.03, n)
     out = pd.DataFrame({"BRENT": brent, "PCE_H": lvl(hm), "PCE_C": lvl(cm),
-                        "CPI_H": lvl(cpi_h), "CPI_C": lvl(cpi_c)})
+                        "CPI_H": lvl(cpi_h), "CPI_C": lvl(cpi_c), "Y2": y2, "REAL10": real10, "BE10": be10})
     return out.loc[pd.Period(start, "M") - 24:]
 
 
