@@ -59,7 +59,11 @@ class OilModel:
         return float(h.loc[h.index == self.origin, col].iloc[0])
 
 
-def load(directory: Path = DIR) -> OilModel:
+def load(directory: Path | None = None) -> OilModel:
+    """Looks in oil_model/ first, then next to app.py (GitHub's web upload can drop the folder)."""
+    if directory is None:
+        candidates = [DIR, DIR.parent]
+        directory = next((d for d in candidates if all((d / f).exists() for f in FILES)), DIR)
     missing = [f for f in FILES if not (directory / f).exists()]
     if missing:
         raise OilModelMissing("Oil-model export not found: " + ", ".join(missing) +
