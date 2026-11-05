@@ -136,43 +136,7 @@ PRESETS: dict[str, dict[str, float]] = {
     "Goldilocks": {"GROWTH": 1.0, "CREDIT": -0.30, "VIX": -4.0, "FED_EXPECT": -0.10, "REAL_YIELD": -0.10},
 }
 
-# --------------------------------------------------------------------------- #
-# 12-month macro views (Top Down inflation thesis), calibrated Nov 5 2026.
-# Starting point: Brent ~$95, WTI ~$88, 2y 4.61%, 10y TIPS 2.65%, 10y breakeven ~2.30%,
-# fed funds 3.88% with a December hike ~69% priced; Sep headline PCE 3.6% y/y, core 3.1%.
-# Values = total change over the next 12 months, in each factor's unit.
-# GROWTH, COPPER, USD and CPI are relative to their historical average pace (the regression
-# intercept absorbs the average), e.g. CPI +0.9 = ~0.9pp more inflation than the ~2.6%/yr norm.
-# --------------------------------------------------------------------------- #
-VIEWS: dict[str, dict[str, float]] = {
-    "Oil re-spikes to $110 and holds": {
-        "OIL": 16.0, "BREAKEVEN": 0.15, "CPI": 0.9, "FED_EXPECT": 0.30, "REAL_YIELD": 0.25,
-        "TERM_PREMIUM": 0.20, "CREDIT": 0.25, "VIX": 3.0, "USD": 1.5, "GROWTH": -1.5,
-        "COPPER": -5.0, "MORTGAGE": 0.10},
-    "Oil eases to $90 and holds": {
-        "OIL": -5.0, "BREAKEVEN": -0.10, "CPI": 0.3, "FED_EXPECT": -0.40, "REAL_YIELD": -0.30,
-        "TERM_PREMIUM": -0.10, "CREDIT": -0.10, "VIX": -2.0, "USD": -1.5, "GROWTH": 0.5,
-        "COPPER": 3.0, "MORTGAGE": -0.05},
-    "Brent slides steadily to $75": {
-        "OIL": -21.0, "BREAKEVEN": -0.25, "CPI": -0.3, "FED_EXPECT": -0.90, "REAL_YIELD": -0.55,
-        "TERM_PREMIUM": -0.20, "CREDIT": -0.15, "VIX": -3.0, "USD": -2.5, "GROWTH": 1.0,
-        "COPPER": 5.0, "MORTGAGE": -0.10},
-}
-
-VIEW_NOTES: dict[str, str] = {
-    "Oil re-spikes to $110 and holds":
-        "Risk case for the thesis. Brent +16% from ~$95. Headline PCE stays ~3.5%, the December hike is "
-        "delivered and another gets priced (2y +30bp), real yields rise, the dollar firms, activity slows.",
-    "Oil eases to $90 and holds":
-        "Base case. Brent drifts to $90 and stays. The spring peak and the $100+ Sep-Oct prices roll out of "
-        "the year-over-year numbers, so headline PCE slows toward ~3% and core edges down. Hikes get priced "
-        "out (2y -40bp), and real yields fall more than breakevens.",
-    "Brent slides steadily to $75":
-        "Strong version of the thesis. Hormuz flows normalise and Brent grinds toward pre-war levels. Headline "
-        "PCE falls toward ~2.5%, the Fed pivots from hikes to cuts (2y -90bp), real yields drop ~55bp, the "
-        "dollar weakens. Assumes supply-driven oil weakness: if oil falls because demand is collapsing, "
-        "use 'Recession / risk-off' instead.",
-}
+# 12-month oil scenarios come from the fund's oil-inflation model (see oil_views.py and oil_model/).
 
 # (start, end) inclusive, YYYY-MM. Limited by data availability (factors start ~2007).
 EPISODES: dict[str, tuple[str, str]] = {

@@ -35,7 +35,7 @@ Tests: `python -m pytest -q`
 | Exposures | Beta of every holding to every factor (colored by t-stat), R², alpha, rolling betas per holding. |
 | Stress test | Move the factor sliders (or pick a scenario / a historical episode) and see the one-month hit by holding and by factor. |
 | Forecast | Monte Carlo over 1 to 36 months. Enter your macro view (e.g. 2y yield -0.75 pp over 12 months), raise the volatility multiplier for a stressed regime. |
-| Inflation | Oil → inflation pass-through (PCE and CPI). Answers "does a second oil wave hit inflation less than the first?", projects headline and core inflation under the three oil paths (or your own), and feeds the CPI move into the 12-month views. |
+| Inflation | The fund's oil-inflation model (top-down-oil): Brent, headline/core PCE and CPI paths and the rates chain for every oil scenario, plus a second-wave test ("does a rise back to an old oil level hit inflation less?"). |
 | Diagnostics | Stationarity (ADF), collinearity (VIF), factor correlations, raw factor history, Excel export. |
 
 ## The model
@@ -88,26 +88,32 @@ regression singular. The existing three rate factors already capture curve moves
 - **Monte Carlo uses normal distributions**, so it understates crash risk. Use the volatility multiplier and
   the stress tab for tails.
 
-## Inflation module (`inflation.py`)
+## Oil scenarios (from the fund's oil-inflation model)
 
-Monthly headline and core inflation are regressed on Brent moves split into two parts:
-every move (`d`), plus Hamilton's **net oil price increase** (`N`), which is non-zero only when Brent
-breaks above its highest level of the past 12 months. A rise back to a level oil has already seen gets
-only the `d` effect, so the model measures how much smaller a "second wave" is. Core inflation also
-carries its own 3-month trend (persistence), and headline follows core's trend.
+The 12-month oil scenarios in the Stress test and Forecast tabs come from the **top-down-oil** model
+(ARDL inflation equations anchored to the 10y breakeven, oil → breakevens, a Fed reaction function for
+the 2y, and the 2y/breakeven pass-through to the 10y real yield). This app reads that model's exported
+results from the `oil_model/` folder; `oil_views.py` turns each scenario into factor moves:
 
-The scenario paths start from the last inflation print, use actual Brent for months already known, and
-simulate forward with the model's historical noise (10-90% ranges). Only oil drives the paths: wages,
-shelter and demand stay at their recent trend, so read them as the oil part of the outlook.
+| Factor | From the oil model |
+|---|---|
+| Breakeven | change in the 10y breakeven to the end of the horizon |
+| Fed path (2y) | change in the 2y, under the Fed rule chosen in the sidebar (core PCE rule or hawkish headline rule) |
+| Real yield | change in the 10y real yield, same rule |
+| CPI | projected 12-month headline CPI inflation minus its historical average pace |
+| Oil | % change in Brent |
 
-The CPI move in each 12-month oil view (Stress test / Forecast) is now taken from this model instead of
-judgment. Extra FRED series: DCOILBRENTEU, PCEPI, PCEPILFE, CPILFESL (strict mode applies to them too).
+Moves are measured from the **latest actual levels** in this app's live data, so "$110 and holds" means
++15% from today's Brent, not from the oil model's starting month. Credit, VIX, dollar, growth, copper,
+term premium and mortgage spread stay at zero because the oil model doesn't cover them.
 
-### Fed / yield links
-The 2y yield (Fed path), 10y real yield and 10y breakeven are each regressed, over overlapping 12-month
-windows, on the 12-month change in core PCE inflation (y/y) and the 12-month % change in Brent
-(Newey-West(12) errors; for the 2y and real yield, windows starting with the 2y below 0.5% are dropped
-because the Fed couldn't cut at the zero bound). For each oil view, the inflation module projects core PCE,
-and these slopes turn that into the 2y, real-yield and breakeven moves the Stress test and Forecast use.
-Note: core inflation drifts back toward its 2006-2026 average in every path, so all views share some
-"baseline" easing; the Inflation tab shows a Brent-flat baseline so you can see the part due to oil.
+**Updating:** in the top-down-oil repo run `python -m oilinfl`, then `python scripts/export_for_factor_app.py`,
+and upload the 5 files in `factor_app_export/` to this repo's `oil_model/` folder. The sidebar warns when
+the export is more than 3 months old; if the folder is missing, the oil scenarios are switched off and the
+app says so.
+
+### Second-wave test (`inflation.py`)
+A separate check on live data: monthly inflation is regressed on Brent moves split into every move plus
+Hamilton's **net oil price increase** (non-zero only when Brent breaks its 12-month high). It measures how
+much less a rise back to an old level adds to inflation. The fund model treats every move alike, so this
+is a cross-check on the $110 path, which stays below the spring 2026 peak.

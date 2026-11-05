@@ -1,0 +1,20 @@
+{
+  "origin": "2026-09",
+  "horizon": 12,
+  "brent_origin": 114.15999999999998,
+  "central_scenario": "flat_105",
+  "labels": {
+    "flat_114": "Brent flat at Sep-26 level ($114)",
+    "flat_105": "Brent flat at $105",
+    "up20_nov": "+20% in Nov, held",
+    "up20_apr": "+20% in Apr, held",
+    "down25_nov": "-25% in Nov, held",
+    "down25_apr": "-25% in Apr, held",
+    "up_down_up": "+25% Nov, back Jan, +25% Apr",
+    "higher_longer": "Higher for longer ($125 from Nov)",
+    "normalize_75": "War ends: glide to $75 by Jan",
+    "hold_110": "Oil re-spikes to $110 and holds",
+    "hold_90": "Oil eases to $90 and holds",
+    "slide_75": "Brent slides steadily to $75"
+  }
+}

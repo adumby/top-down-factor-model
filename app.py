@@ -17,14 +17,15 @@ import importlib
 import config as _config
 import charts as C
 import inflation as INF
+import oil_views as OV
 import data as D
 import model as _model
 import portfolio as _portfolio
-for _m in (_config, C, INF, D, _model, _portfolio):
+for _m in (_config, C, INF, OV, D, _model, _portfolio):
     importlib.reload(_m)
 
 from config import (ASSETS, ASSET_BY_TICKER, CASH, EPISODES, FACTOR_BY_KEY, FACTOR_KEYS, FACTORS,
-                    PRESETS, TICKERS, VIEW_NOTES, VIEWS)
+                    PRESETS, TICKERS)
 from model import factor_diagnostics, fit_models
 from portfolio import (attribution, performance_stats, portfolio_betas, portfolio_returns,
                        risk_decomposition, rolling_ols, sim_stats, simulate, stress, to_fractions)
@@ -113,38 +114,58 @@ def get_inflation(src: str, signature: tuple, _ds: D.Dataset):
     L = _ds.levels
     if L is None:
         return None
-    out = {fam: INF.fit(L["BRENT"], L[f"{fam}_H"], L[f"{fam}_C"], fam) for fam in ("PCE", "CPI")}
-    out["links"] = INF.fit_links(L, out["PCE"])        # Fed/yield reaction, driven by core PCE
-    return out
+    return {fam: INF.fit(L["BRENT"], L[f"{fam}_H"], L[f"{fam}_C"], fam) for fam in ("PCE", "CPI")}
 
 
 INFL = get_inflation(SRC, SIGNATURE, ds)
 LAST_BRENT = float(ds.levels["BRENT"].dropna().iloc[-1]) if ds.levels is not None else None
 
 
-def calibrate_views():
-    """Replace judgment with model output in each 12m view: CPI from the pass-through model; the 2y,
-    10y real yield and 10y breakeven from the estimated Fed/yield links. Returns (views, drivers)."""
-    out = {k: dict(v) for k, v in VIEWS.items()}
-    drivers = {}
-    if INFL is None:
-        return out, drivers
-    avg = float(INFL["CPI"].head_mm.loc[est_start:].mean())   # same series and window as the CPI factor
-    for name, path in INF.view_paths(LAST_BRENT).items():
-        if name not in out:
-            continue
-        out[name]["CPI"] = round(INF.cpi_view_value(INFL["CPI"], path, hist_mean_mm=avg), 2)
-        if INFL.get("links") is not None:
-            dr = INF.scenario_drivers(INFL["PCE"], path, LAST_BRENT)
-            drivers[name] = dr
-            for k, v in INF.link_view_values(INFL["links"], dr).items():
-                out[name][k] = round(v, 2)
-    return out, drivers
+# --------------------------------------------------------------------------- #
+# Oil scenarios from the fund's oil-inflation model (top-down-oil repo -> oil_model/ folder)
+# --------------------------------------------------------------------------- #
+try:
+    OM, OM_ERR = OV.load(), None
+except OV.OilModelMissing as exc:
+    OM, OM_ERR = None, str(exc)
 
 
-VIEWS_LIVE, VIEW_DRIVERS = calibrate_views()
-CPI_NOTE = (" CPI, 2y, real-yield and breakeven moves come from the models in the Inflation tab; the "
-            "other factors are judgment." if INFL is not None else "")
+def _flag_reapply():
+    st.session_state["_reapply_oil"] = True
+
+
+st.sidebar.markdown("---")
+OIL_RULE = st.sidebar.radio("Fed reaction in oil scenarios", list(OV.RULE_LABELS), format_func=OV.RULE_LABELS.get,
+                            key="oil_rule", on_change=_flag_reapply,
+                            help="How the 2y and real yields respond in the oil-model scenarios. Core rule = what "
+                                 "the Fed has done since 2016. Hawkish = the Fed doesn't look through energy.")
+
+
+def _current_levels() -> dict:
+    """Latest actual levels the scenario moves are measured from."""
+    L = ds.levels
+    if L is None:
+        return {}
+    out = {}
+    for k, col in (("T10YIEM", "BE10"), ("GS2", "Y2"), ("FII10", "REAL10"), ("BRENT", "BRENT")):
+        if col in L.columns and L[col].notna().any():
+            out[k] = float(L[col].dropna().iloc[-1])
+    return out
+
+
+CURRENT = _current_levels()
+CURRENT_MONTH = ds.levels["BRENT"].dropna().index[-1] if ds.levels is not None else None
+if OM is not None:
+    _cpi_avg = float(ds.factors["CPI"].loc[est_start:].mean()) if "CPI" in ds.factors else 0.0
+    VIEWS_LIVE = OV.views(OM, OIL_RULE, _cpi_avg, CURRENT)
+    VIEW_NOTES_LIVE = OV.notes(OM, OIL_RULE)
+    if OV.staleness_months(OM) > 3:
+        st.sidebar.warning(f"The oil-model export is from {OM.origin.strftime('%b %Y')}. Re-run it with new data "
+                           "and upload a fresh export.")
+else:
+    VIEWS_LIVE, VIEW_NOTES_LIVE = {}, {}
+    st.sidebar.error("Oil-model scenarios unavailable: " + OM_ERR)
+OILP = "Oil model: "
 
 for n in ds.notes:
     st.sidebar.warning(n)
@@ -466,21 +487,28 @@ with tabs[3]:
         if p.startswith("Episode: "):
             a, b = EPISODES[p.removeprefix("Episode: ")]
             vals = ds.factors.loc[pd.Period(a, "M"):pd.Period(b, "M")].sum().to_dict()
-        elif p.startswith("12m view: "):
-            vals = VIEWS_LIVE[p.removeprefix("12m view: ")]
+        elif p.startswith(OILP):
+            vals = VIEWS_LIVE.get(p.removeprefix(OILP), {})
         else:
             vals = PRESETS.get(p, {})
         for f in FACTORS:
             st.session_state[f"shock_{f.key}"] = float(round(vals.get(f.key, 0.0) / f.step) * f.step)
 
-    opts = list(PRESETS) + [f"12m view: {v}" for v in VIEWS] + [f"Episode: {e}" for e in EPISODES]
+    opts = list(PRESETS) + [f"{OILP}{v}" for v in VIEWS_LIVE] + [f"Episode: {e}" for e in EPISODES]
     DEFAULT_PRESET = "Hawkish Fed surprise"
     st.session_state.setdefault("preset", DEFAULT_PRESET)
+    if st.session_state.preset not in opts:          # e.g. a scenario renamed since the last run
+        st.session_state.preset = DEFAULT_PRESET
+        _apply_preset()
+    if st.session_state.pop("_reapply_oil", False):  # Fed rule changed: refresh oil-scenario sliders
+        st.session_state["_reapply_oil_view"] = True
+        if st.session_state.preset.startswith(OILP):
+            _apply_preset()
     st.selectbox("Scenario", opts, key="preset", on_change=_apply_preset,
                  help="Episodes use the actual cumulative factor moves from that period, applied as one shock.")
-    if st.session_state.preset.startswith("12m view: "):
-        st.info(VIEW_NOTES[st.session_state.preset.removeprefix("12m view: ")] + CPI_NOTE +
-                " Applied here as the full 12-month move at once (total impact, no alpha or T-bill return).")
+    if st.session_state.preset.startswith(OILP):
+        st.info(VIEW_NOTES_LIVE.get(st.session_state.preset.removeprefix(OILP), "") +
+                " Moves are measured from the latest actual levels and applied here as the full 12-month move at once (total impact, no alpha or T-bill return).")
     for f in FACTORS:
         st.session_state.setdefault(f"shock_{f.key}", float(PRESETS[DEFAULT_PRESET].get(f.key, 0.0)))
 
@@ -551,18 +579,24 @@ with tabs[4]:
 
     def _apply_view():
         v = st.session_state.view_preset
-        vals = VIEWS_LIVE.get(v, PRESETS.get(v, {}))
-        if v in VIEWS:
+        vals = VIEWS_LIVE.get(v.removeprefix(OILP), {}) if v.startswith(OILP) else PRESETS.get(v, {})
+        if v.startswith(OILP):
             st.session_state["horizon"] = 12
         for f in FACTORS:
             st.session_state[f"view_{f.key}"] = float(vals.get(f.key, 0.0))
 
     with st.expander("Your macro view: expected total change in each factor over the horizon", expanded=True):
-        st.selectbox("Start from a scenario", ["Custom (all zero)"] + list(VIEWS) +
-                     [p for p in PRESETS if p != "Custom (all zero)"], key="view_preset", on_change=_apply_view,
-                     help="Treats a stress scenario as the expected total move over the horizon.")
-        if st.session_state.view_preset in VIEW_NOTES:
-            st.info(VIEW_NOTES[st.session_state.view_preset] + CPI_NOTE)
+        vopts = (["Custom (all zero)"] + [f"{OILP}{v}" for v in VIEWS_LIVE] +
+                 [p for p in PRESETS if p != "Custom (all zero)"])
+        if st.session_state.get("view_preset") not in vopts:
+            st.session_state["view_preset"] = "Custom (all zero)"
+        if st.session_state.pop("_reapply_oil_view", False) and st.session_state["view_preset"].startswith(OILP):
+            _apply_view()
+        st.selectbox("Start from a scenario", vopts, key="view_preset", on_change=_apply_view,
+                     help="Oil-model scenarios are 12-month paths. Other presets are treated as the expected total "
+                          "move over the horizon.")
+        if st.session_state.view_preset.startswith(OILP):
+            st.info(VIEW_NOTES_LIVE.get(st.session_state.view_preset.removeprefix(OILP), ""))
         vc = st.columns(4)
         for i, f in enumerate(FACTORS):
             st.session_state.setdefault(f"view_{f.key}", 0.0)
@@ -642,20 +676,100 @@ with tabs[4]:
 # Inflation (oil pass-through)
 # --------------------------------------------------------------------------- #
 with tabs[5]:
+    # ================= the fund's oil-inflation model =================
+    st.subheader("Fund oil-inflation model")
+    if OM is None:
+        st.error(OM_ERR)
+    else:
+        st.markdown(
+            f"Scenarios from the **top-down-oil** model: ARDL inflation equations anchored to the 10y breakeven, "
+            f"oil → breakevens, a Fed reaction function for the 2y and the pass-through to the 10y real yield. "
+            f"Data through **{OM.origin.strftime('%b %Y')}**, projected to **{OM.end.strftime('%b %Y')}**. Fed rule: "
+            f"**{OV.RULE_LABELS[OIL_RULE]}** (change it in the sidebar).")
+        labels = list(OM.labels.values())
+        mine = [l for l in labels if l in ("Oil re-spikes to $110 and holds", "Oil eases to $90 and holds",
+                                           "Brent slides steadily to $75", "Brent flat at $105")]
+        sel = st.multiselect("Scenarios", labels, default=mine or labels[:4], key="om_sel")
+        key_of = {v: k for k, v in OM.labels.items()}
+        # fixed colour per scenario (follows the scenario, never its position in the list)
+        _fixed = {"hold_110": C.SERIES[7], "hold_90": C.SERIES[2], "slide_75": C.SERIES[6], "flat_105": C.SERIES[3],
+                  "flat_114": C.SERIES[0], "up20_nov": C.SERIES[1], "down25_nov": C.SERIES[5],
+                  "normalize_75": C.SERIES[4]}
+        pal = {l: _fixed.get(k, C.MUTED) for k, l in OM.labels.items()}
+
+        def _legend_below(fig):
+            fig.update_layout(legend=dict(orientation="h", y=-0.14, yanchor="top", x=0, xanchor="left"),
+                              margin=dict(t=48, b=10))
+            return fig
+
+        def _chart(target, title):
+            fig = go.Figure()
+            h = OM.infl_hist[OM.infl_hist["target"] == target].set_index("date")["yoy"].iloc[-24:]
+            C.line(fig, h.index.to_timestamp(), h.values, "Actual", C.INK2)
+            for l in sel:
+                q = OM.paths[(OM.paths["scenario"] == key_of[l]) & (OM.paths["target"] == target)].set_index("date")
+                q = q.loc[q.index > OM.origin]["yoy"]
+                x = [h.index[-1]] + list(q.index)
+                y = [h.iloc[-1]] + list(q.values)
+                C.line(fig, pd.PeriodIndex(x).to_timestamp(), y, l, pal[l], dash="dot")
+            C.finish(fig, title, 430, hover="x unified")
+            return _legend_below(fig)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            fig = go.Figure()
+            if ds.levels is not None:
+                hb = ds.levels["BRENT"].dropna().iloc[-24:]
+                C.line(fig, hb.index.to_timestamp(), hb.values, "Actual", C.INK2, fmt=".0f")
+            for l in sel:
+                q = OM.paths[(OM.paths["scenario"] == key_of[l]) & (OM.paths["target"] == "headline_pce")]
+                q = q.set_index("date")["brent"]
+                C.line(fig, q.index.to_timestamp(), q.values, l, pal[l], dash="dot", fmt=".0f")
+            C.finish(fig, "Brent ($, monthly average)", 430, hover="x unified")
+            st.plotly_chart(_legend_below(fig), width="stretch", theme=None)
+        with c2:
+            st.plotly_chart(_chart("headline_pce", "Headline PCE, y/y %"), width="stretch", theme=None)
+        c3, c4 = st.columns(2)
+        with c3:
+            st.plotly_chart(_chart("core_pce", "Core PCE, y/y %"), width="stretch", theme=None)
+        with c4:
+            st.plotly_chart(_chart("headline_cpi", "Headline CPI, y/y %"), width="stretch", theme=None)
+
+        summ = OV.summary(OM, OIL_RULE)
+        summ = summ.loc[[l for l in sel if l in summ.index]]
+        pct_cols = ["Headline PCE", "Core PCE", "Headline CPI", "Core CPI", "10y breakeven", "2y", "10y real"]
+        st.markdown(f"**At {OM.end.strftime('%b %Y')}** (10-90% ranges for PCE)")
+        st.dataframe(summ.style.format({**{c: "{:.2f}%" for c in pct_cols}, "Brent at end ($)": "${:.0f}",
+                                        "XLK, real-yield channel": "{:+.1f}%"}), width="stretch")
+        st.caption(f"Actual at {OM.origin.strftime('%b %Y')}: 2y {OM.origin_rate('GS2'):.2f}%, 10y real "
+                   f"{OM.origin_rate('FII10'):.2f}%, 10y breakeven {OM.origin_rate('T10YIEM'):.2f}%, Brent "
+                   f"${OM.meta['brent_origin']:.0f}. Paths from the oil model's own outputs; to update, re-run it and "
+                   "upload a new export to the oil_model/ folder.")
+
+        st.markdown("**What goes into the factor scenarios** (Stress test and Forecast tabs, 12-month moves)")
+        base = (f"Measured from the latest actual levels ({CURRENT_MONTH.strftime('%b %Y')}): "
+                + ", ".join(f"{k} {v:.2f}" for k, v in CURRENT.items())) if CURRENT else \
+            "Measured from the oil model's origin month."
+        vt = pd.DataFrame({l: VIEWS_LIVE[l] for l in sel if l in VIEWS_LIVE}).T
+        vt = vt.rename(columns={"BREAKEVEN": "Breakeven (pp)", "FED_EXPECT": "2y (pp)", "REAL_YIELD": "Real yield (pp)",
+                                "CPI": "CPI vs average pace (pp)", "OIL": "Oil (%)"})
+        st.dataframe(vt.style.format("{:+.2f}"), width="stretch")
+        st.caption(base + ". Credit, VIX, dollar, growth, copper, term premium and mortgage spread are held "
+                   "flat: the oil model doesn't cover them.")
+
+    # ================= extra check: second-wave test =================
+    st.markdown("---")
+    st.subheader("Extra check: does a second oil wave hit inflation less?")
     if INFL is None:
         st.info("Inflation data isn't loaded. Click Refresh data in the sidebar.")
     else:
-        fam = st.radio("Inflation measure", ["PCE", "CPI"], horizontal=True,
-                       help="PCE is the Fed's target measure. CPI is what feeds the factor model's views.")
+        fam = st.radio("Inflation measure", ["PCE", "CPI"], horizontal=True, key="sw_fam")
         pt = INFL[fam]
-        st.markdown(f"Model of how oil (Brent, monthly average) feeds into **{fam}** inflation, estimated on "
-                    f"{pt.start.strftime('%b %Y')} to {pt.end.strftime('%b %Y')}. Oil moves count in two parts: "
-                    "every move, plus an extra term only when oil breaks to a **new 12-month high** "
-                    "(Hamilton's net oil price increase). A rise back to a level oil has already been at only "
-                    "gets the first part.")
-
-        # ---- 1. second-wave question
-        st.subheader("Does a second oil wave hit inflation less?")
+        st.markdown(f"A separate quick test on live data ({pt.start.strftime('%b %Y')} to "
+                    f"{pt.end.strftime('%b %Y')}): it splits oil moves into every move plus an extra term only when "
+                    "Brent breaks a **new 12-month high** (Hamilton's net oil price increase). The fund model above "
+                    "treats every move alike, so this tells you whether a rise back to an old level should count "
+                    "for less.")
         imp = INF.impulse_comparison(pt)
         pv = INF.new_high_pvalues(pt)
         nh, bk = imp.loc["New 12-month high"], imp.loc["Back to an earlier level"]
@@ -685,127 +799,6 @@ with tabs[5]:
             st.caption("'trend' = average of the last 3 months of core inflation (persistence). Oil terms are in "
                        "% moves of Brent. Newey-West standard errors.")
 
-        # ---- 2. scenario paths
-        st.subheader(f"{fam} inflation under each oil path")
-        H = 18
-        paths = {"Brent flat at today's level (baseline)": np.full(H, LAST_BRENT), **INF.view_paths(LAST_BRENT, months=H)}
-        with st.expander("Add a custom oil path"):
-            cc1, cc2, cc3 = st.columns(3)
-            use_custom = cc1.checkbox("Include custom path", value=False)
-            tgt = cc2.number_input("Brent target ($)", 30.0, 200.0, 100.0, 1.0)
-            ramp = cc3.slider("Months to get there", 1, 12, 3)
-            if use_custom:
-                paths[f"Custom: ${tgt:.0f} in {ramp}m, then holds"] = INF.custom_path(LAST_BRENT, tgt, ramp, H)
-        sel = st.multiselect("Paths", list(paths), default=list(paths))
-        pc_ = pt.core.params
-        if 0 < pc_["trend"] < 1:
-            lr = 100 * (np.exp(12 * pc_["const"] / (1 - pc_["trend"]) / 100) - 1)
-            st.caption(f"Core {fam} drifts back toward about **{lr:.1f}%** (its 2006-2026 average pace) in every "
-                       "path, even with oil flat. Compare each path with the grey baseline to see the part "
-                       "that is down to oil.")
-        pal = {n: c for n, c in zip(paths, [C.MUTED, C.SERIES[3], C.SERIES[2], C.SERIES[6], C.SERIES[4]])}
-
-        @st.cache_data(show_spinner=False)
-        def _proj(src, signature, fam_, path_tuple):
-            return INF.project(INFL[fam_], np.array(path_tuple), n_sims=1000, seed=1)
-
-        res = {n: _proj(SRC, SIGNATURE, fam, tuple(np.round(paths[n], 4))) for n in sel}
-        hist_b = ds.levels["BRENT"].dropna().iloc[-24:]
-        c1, c2 = st.columns(2)
-        with c1:
-            fig = go.Figure()
-            C.line(fig, hist_b.index.to_timestamp(), hist_b.values, "Actual", C.INK2, fmt=".0f")
-            for n in sel:
-                r = res[n]
-                x = [hist_b.index[-1]] + list(r["path_index"])
-                y = [hist_b.iloc[-1]] + list(paths[n])
-                C.line(fig, pd.PeriodIndex(x).to_timestamp(), y, n, pal[n], dash="dot", fmt=".0f")
-            C.finish(fig, "Brent ($, monthly average)", 380, hover="x unified")
-            st.plotly_chart(fig, width="stretch", theme=None)
-        for col, key, title in ((c2, "head", f"Headline {fam}, y/y %"), (None, "core", f"Core {fam}, y/y %")):
-            fig = go.Figure()
-            first = res[sel[0]] if sel else None
-            if first is not None:
-                act = first[f"{key}_yoy"].loc[:first["last_actual"]].dropna().iloc[-24:]
-                C.line(fig, act.index.to_timestamp(), act.values, "Actual", C.INK2)
-                for n in sel:
-                    r = res[n]
-                    proj = r[f"{key}_yoy"].loc[r["last_actual"]:]
-                    C.line(fig, proj.index.to_timestamp(), proj.values, n, pal[n], dash="dot")
-            C.finish(fig, title, 380, hover="x unified")
-            if col is not None:
-                with col:
-                    st.plotly_chart(fig, width="stretch", theme=None)
-            else:
-                st.plotly_chart(fig, width="stretch", theme=None)
-
-        if sel:
-            rows = []
-            for n in sel:
-                r = res[n]
-                fi = r["path_index"]
-                a6, a12 = fi[5], fi[11]
-                rows.append({
-                    "Path": n,
-                    "Brent in 12m": paths[n][11],
-                    f"Headline now ({r['last_actual'].strftime('%b %y')})": r["head_yoy"].loc[r["last_actual"]],
-                    f"Headline {a6.strftime('%b %y')}": r["head_yoy"].loc[a6],
-                    f"Headline {a12.strftime('%b %y')}": r["head_yoy"].loc[a12],
-                    "Headline 12m range (10-90%)": f"{r['head_yoy_p10'].loc[a12]:.1f} to {r['head_yoy_p90'].loc[a12]:.1f}",
-                    f"Core {a12.strftime('%b %y')}": r["core_yoy"].loc[a12],
-                    "Core 12m range (10-90%)": f"{r['core_yoy_p10'].loc[a12]:.1f} to {r['core_yoy_p90'].loc[a12]:.1f}",
-                })
-            tb = pd.DataFrame(rows).set_index("Path")
-            num = [c for c in tb.columns if "range" not in c and c != "Brent in 12m"]
-            st.dataframe(tb.style.format({**{c: "{:.2f}%" for c in num}, "Brent in 12m": "${:.0f}"}),
-                         width="stretch")
-        st.caption(f"Starts from the last {fam} print and uses actual Brent for months already known. 'Now' is "
-                   "the last actual reading. The ranges add the model's historical month-to-month noise. "
-                   "Only oil drives these paths: wages, shelter, tariffs and demand are held at their recent trend, "
-                   "so treat them as the oil part of the inflation outlook, not a full forecast.")
-
-        # ---- 3. Fed / yield reaction
-        st.subheader("How the Fed and yields react")
-        lk = INFL.get("links")
-        if lk is None:
-            st.info("Yield data not loaded.")
-        else:
-            st.markdown("Estimated from 12-month windows, "
-                        f"{lk.start.strftime('%b %Y')} to {lk.end.strftime('%b %Y')}: how much each yield moved "
-                        "for a 1pp change in **core PCE** (y/y) and a 1% move in Brent over the same 12 months. "
-                        f"For the 2y and real yield, {lk.zlb_dropped} windows that started at the zero bound are "
-                        "left out, because the Fed couldn't cut there.")
-            rows = []
-            for key, res in lk.fits.items():
-                rows.append({"Yield": INF.LINK_TARGETS[key][1],
-                             "per 1pp core inflation": res.params["core inflation chg (pp)"],
-                             "t-stat (core)": res.tvalues["core inflation chg (pp)"],
-                             "per 10% oil move": 10 * res.params["oil chg (%)"],
-                             "t-stat (oil)": res.tvalues["oil chg (%)"],
-                             "R²": res.rsquared, "windows": int(res.nobs)})
-            st.dataframe(pd.DataFrame(rows).set_index("Yield").style.format(
-                {"per 1pp core inflation": "{:+.2f} pp", "t-stat (core)": "{:+.1f}", "per 10% oil move": "{:+.2f} pp",
-                 "t-stat (oil)": "{:+.1f}", "R²": "{:.2f}", "windows": "{:.0f}"}), width="stretch")
-            st.caption("t-stats above about 2 mean the link is reliable. Windows overlap, so Newey-West(12) "
-                       "standard errors are used.")
-
-        # ---- 4. link to factor-model views
-        st.subheader("What this feeds into the 12-month views")
-        rows = []
-        for n in VIEWS:
-            row = {"View": n}
-            dr = VIEW_DRIVERS.get(n, {})
-            if dr:
-                row["Core PCE chg (pp)"] = dr["core inflation chg (pp)"]
-                row["Brent chg (%)"] = dr["oil chg (%)"]
-            for k, lbl in (("CPI", "CPI"), ("FED_EXPECT", "2y"), ("REAL_YIELD", "Real yield"), ("BREAKEVEN", "Breakeven")):
-                row[f"{lbl}: judgment"] = VIEWS[n].get(k, np.nan)
-                row[f"{lbl}: model"] = VIEWS_LIVE[n].get(k, np.nan)
-            rows.append(row)
-        st.dataframe(pd.DataFrame(rows).set_index("View").style.format("{:+.2f}"), width="stretch")
-        st.caption("All in pp over 12 months (CPI = projected inflation minus its historical average pace). The "
-                   "Stress test and Forecast tabs now use the model columns. Credit, VIX, dollar, growth, copper, "
-                   "term premium and mortgage spread are still judgment.")
 
 # --------------------------------------------------------------------------- #
 # Diagnostics
