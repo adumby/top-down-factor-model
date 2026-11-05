@@ -20,7 +20,7 @@ from config import (ASSETS, CASH, FACTOR_KEYS, FACTORS, FRED_IDS, INFLATION_SERI
                     RF_FRED_ID, TICKERS)
 
 CACHE_DIR = Path(__file__).parent / "data_cache"
-START = "2003-12-01"
+START = "2002-12-01"           # factors start with TIPS/breakevens (Jan 2003)
 YIELD_LEVELS = {"Y2": "DGS2", "REAL10": "DFII10", "BE10": "T10YIE"}
 
 
@@ -48,6 +48,14 @@ def to_monthly_last(s: pd.Series) -> pd.Series:
     return s.groupby(s.index.to_period("M")).last()
 
 
+def _transform(m: pd.Series, how: str) -> pd.Series:
+    if how == "diff":
+        return m.diff()
+    if how == "logdiff":
+        return np.log(m.where(m > 0)).diff() * 100.0
+    raise ValueError(how)
+
+
 def build_factors(raw: dict[str, pd.Series]) -> pd.DataFrame:
     """Factors whose FRED series are missing from `raw` are skipped (column left out)."""
     out = {}
@@ -57,12 +65,11 @@ def build_factors(raw: dict[str, pd.Series]) -> pd.DataFrame:
             continue
         parts = [to_monthly_last(raw[sid]) for sid in ids]
         m = parts[0] if len(parts) == 1 else parts[0].sub(parts[1])
-        if f.transform == "diff":
-            out[f.key] = m.diff()
-        elif f.transform == "logdiff":
-            out[f.key] = np.log(m.where(m > 0)).diff() * 100.0
-        else:
-            raise ValueError(f.transform)
+        out[f.key] = _transform(m, f.transform)
+        if f.backfill and f.backfill in raw and not raw[f.backfill].dropna().empty:
+            # splice CHANGES (not levels): the primary series wins wherever it has data
+            old = _transform(to_monthly_last(raw[f.backfill]), f.transform)
+            out[f.key] = out[f.key].combine_first(old.loc[:out[f.key].first_valid_index()])
     return pd.DataFrame(out)[[k for k in FACTOR_KEYS if k in out]]
 
 

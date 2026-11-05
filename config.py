@@ -61,6 +61,7 @@ class Factor:
     step: float
     desc: str
     short: str = ""      # compact label for chart axes
+    backfill: str = ""   # older FRED series whose monthly changes fill months before `fred` starts
 
 
 FACTORS: list[Factor] = [
@@ -77,7 +78,8 @@ FACTORS: list[Factor] = [
            "Monthly % change in industrial production. Published with a lag and revised: "
            "see README on vintage data.", short="Ind. production"),
     Factor("USD", "US dollar (broad index)", "DTWEXBGS", "D", "logdiff", "%", -6.0, 6.0, 0.25,
-           "Monthly % change in the Fed's broad trade-weighted dollar index.", short="Dollar"),
+           "Monthly % change in the Fed's broad trade-weighted dollar index. Before 2006 it uses the "
+           "older goods-only broad index (DTWEXB), which the Fed discontinued in 2019.", short="Dollar", backfill="DTWEXB"),
     Factor("OIL", "Oil (WTI)", "DCOILWTICO", "D", "logdiff", "%", -30.0, 30.0, 1.0,
            "Monthly % change in the WTI crude spot price.", short="Oil"),
     Factor("VIX", "Risk sentiment (VIX)", "VIXCLS", "D", "diff", "pts", -15.0, 25.0, 0.5,
@@ -111,7 +113,8 @@ INFLATION_SERIES = {                     # key: (FRED id, label)
     "CPI_C": ("CPILFESL", "Core CPI"),
 }
 
-FRED_IDS = sorted({sid for f in FACTORS for sid in f.fred.split("-")} | {RF_FRED_ID, OIL_LEVEL_FRED}
+FRED_IDS = sorted({sid for f in FACTORS for sid in f.fred.split("-")} | {f.backfill for f in FACTORS if f.backfill}
+                  | {RF_FRED_ID, OIL_LEVEL_FRED}
                   | {v[0] for v in INFLATION_SERIES.values()})
 
 

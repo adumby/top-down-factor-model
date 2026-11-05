@@ -51,7 +51,7 @@ so changing weights doesn't require re-estimating anything.
 | Fed hike/cut expectations | DGS2 | 2y Treasury yield (pp) |
 | Credit spread | BAA10Y | Baa minus 10y (pp) |
 | Real activity | INDPRO | Industrial production (%) |
-| Dollar | DTWEXBGS | Broad dollar index (%) |
+| Dollar | DTWEXBGS (before 2006: DTWEXB) | Broad dollar index (%). The older goods-only index fills 2003-05 so the factors start with TIPS in 2003 |
 | Oil | DCOILWTICO | WTI (%) |
 | Risk sentiment | VIXCLS | VIX (points) |
 | Term premium | THREEFYTP10 | 10y Kim-Wright term premium (pp) |
