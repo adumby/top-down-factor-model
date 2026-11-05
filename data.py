@@ -49,7 +49,9 @@ def to_monthly_last(s: pd.Series) -> pd.Series:
 def build_factors(raw: dict[str, pd.Series]) -> pd.DataFrame:
     out = {}
     for f in FACTORS:
-        m = to_monthly_last(raw[f.fred])
+        # "A-B" means the spread between two FRED series, each taken at month-end
+        parts = [to_monthly_last(raw[sid]) for sid in f.fred.split("-")]
+        m = parts[0] if len(parts) == 1 else parts[0].sub(parts[1])
         if f.transform == "diff":
             out[f.key] = m.diff()
         elif f.transform == "logdiff":
@@ -204,7 +206,8 @@ def make_demo(seed: int = 7, start: str = "2007-01", end: str = "2026-10") -> Da
     n = len(idx)
     keys = FACTOR_KEYS
     sd = pd.Series({"REAL_YIELD": 0.20, "BREAKEVEN": 0.15, "FED_EXPECT": 0.22, "CREDIT": 0.20,
-                    "GROWTH": 0.7, "USD": 1.4, "OIL": 9.0, "VIX": 5.0})[keys]
+                    "GROWTH": 0.7, "USD": 1.4, "OIL": 9.0, "VIX": 5.0, "TERM_PREMIUM": 0.15,
+                    "COPPER": 6.0, "MORTGAGE": 0.12, "CPI": 0.30}).reindex(keys).fillna(1.0)
     corr = pd.DataFrame(np.eye(len(keys)), index=keys, columns=keys)
 
     def setc(a, b, v):
@@ -213,12 +216,26 @@ def make_demo(seed: int = 7, start: str = "2007-01", end: str = "2026-10") -> Da
     setc("CREDIT", "VIX", 0.70); setc("CREDIT", "GROWTH", -0.40); setc("OIL", "BREAKEVEN", 0.40)
     setc("OIL", "GROWTH", 0.20); setc("USD", "OIL", -0.35); setc("USD", "VIX", 0.30)
     setc("VIX", "GROWTH", -0.40)
+    for a, b, v in [("COPPER", "GROWTH", 0.35), ("COPPER", "OIL", 0.35), ("CPI", "OIL", 0.45),
+                    ("CPI", "BREAKEVEN", 0.30), ("TERM_PREMIUM", "REAL_YIELD", 0.50),
+                    ("MORTGAGE", "CREDIT", 0.30)]:
+        if a in keys and b in keys:
+            setc(a, b, v)
     cov = corr.values * np.outer(sd.values, sd.values)
     f = pd.DataFrame(rng.multivariate_normal(np.zeros(len(keys)), cov, size=n), index=idx, columns=keys)
 
     rf = pd.Series(np.clip(0.25 * np.exp(-((np.arange(n) - 20) / 60.0) ** 2) + 0.05, 0.02, 0.45)
                    + np.where(np.arange(n) > 190, 0.2, 0.0), index=idx, name="RF")
-    betas = pd.DataFrame(_DEMO_BETAS, index=keys).T
+    base_keys = ["REAL_YIELD", "BREAKEVEN", "FED_EXPECT", "CREDIT", "GROWTH", "USD", "OIL", "VIX"]
+    betas = pd.DataFrame(_DEMO_BETAS, index=base_keys).T.reindex(columns=keys).fillna(0.0)
+    extra = {"VGIT": {"TERM_PREMIUM": -4.0}, "AGZ": {"TERM_PREMIUM": -2.5}, "VGT": {"TERM_PREMIUM": -2.0},
+             "XLB": {"COPPER": 0.25}, "XLI": {"COPPER": 0.12}, "SCHH": {"MORTGAGE": -4.0},
+             "XLY": {"MORTGAGE": -2.0, "CPI": -1.5}, "XLP": {"CPI": -1.0}, "IBID": {"CPI": 0.4},
+             "IAU": {"CPI": 1.0}}
+    for t, d in extra.items():
+        for k, v in d.items():
+            if k in betas.columns:
+                betas.loc[t, k] = v
     mkt = rng.standard_normal(n)
     rets = {}
     for a in ASSETS:

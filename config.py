@@ -82,11 +82,25 @@ FACTORS: list[Factor] = [
            "Monthly % change in the WTI crude spot price.", short="Oil"),
     Factor("VIX", "Risk sentiment (VIX)", "VIXCLS", "D", "diff", "pts", -15.0, 25.0, 0.5,
            "Monthly change in the VIX, in index points.", short="VIX"),
+    Factor("TERM_PREMIUM", "Term premium (10y, Kim-Wright)", "THREEFYTP10", "D", "diff", "pp", -1.0, 1.0, 0.05,
+           "Monthly change in the 10-year term premium: the extra yield investors demand to hold long "
+           "bonds instead of rolling short ones. Moves the long end independently of Fed expectations.",
+           short="Term premium"),
+    Factor("COPPER", "Copper (global price)", "PCOPPUSDM", "M", "logdiff", "%", -20.0, 20.0, 1.0,
+           "Monthly % change in the global copper price (monthly average): a fast read on global "
+           "industrial demand.", short="Copper"),
+    Factor("MORTGAGE", "Mortgage spread (30y mortgage - 10y)", "MORTGAGE30US-DGS10", "D", "diff", "pp",
+           -0.75, 0.75, 0.05,
+           "Monthly change in the 30y fixed mortgage rate minus the 10y Treasury yield: housing-finance "
+           "stress beyond what Treasury yields already capture.", short="Mortgage spread"),
+    Factor("CPI", "CPI inflation (actual, m/m)", "CPIAUCSL", "M", "logdiff", "%", -1.0, 1.5, 0.05,
+           "Monthly % change in headline CPI (seasonally adjusted). Actual inflation, versus breakevens "
+           "which are expected inflation. Released mid-following-month.", short="CPI (actual)"),
 ]
 
 FACTOR_KEYS = [f.key for f in FACTORS]
 FACTOR_BY_KEY = {f.key: f for f in FACTORS}
-FRED_IDS = sorted({f.fred for f in FACTORS} | {RF_FRED_ID})
+FRED_IDS = sorted({sid for f in FACTORS for sid in f.fred.split("-")} | {RF_FRED_ID})
 
 
 # --------------------------------------------------------------------------- #

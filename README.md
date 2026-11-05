@@ -49,6 +49,14 @@ so changing weights doesn't require re-estimating anything.
 | Dollar | DTWEXBGS | Broad dollar index (%) |
 | Oil | DCOILWTICO | WTI (%) |
 | Risk sentiment | VIXCLS | VIX (points) |
+| Term premium | THREEFYTP10 | 10y Kim-Wright term premium (pp) |
+| Copper | PCOPPUSDM | Global copper price (%) |
+| Mortgage spread | MORTGAGE30US − DGS10 | 30y mortgage minus 10y Treasury (pp) |
+| CPI inflation | CPIAUCSL | Headline CPI, actual (%) |
+
+Note: a 10y−2y curve factor is deliberately *not* included. FRED's breakeven is defined as the 10y nominal minus
+the 10y TIPS yield, so the curve equals real yield + breakeven − 2y exactly, and adding it would make the
+regression singular. The existing three rate factors already capture curve moves.
 
 ## Changing things
 
