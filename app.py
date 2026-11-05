@@ -140,12 +140,18 @@ OIL_RULE = st.sidebar.radio("Fed reaction in oil scenarios", list(OV.RULE_LABELS
                             key="oil_rule", on_change=_flag_reapply,
                             help="How the 2y and real yields respond in the oil-model scenarios. Core rule = what "
                                  "the Fed has done since 2016. Hawkish = the Fed doesn't look through energy.")
-FILL_ON = st.sidebar.toggle("Fill other factors with their historical co-movement", value=True, key="oil_fill",
-                            on_change=_flag_reapply,
-                            help="The oil model sets oil, CPI, breakevens, the 2y and the real yield. On: credit, VIX, "
-                                 "dollar, growth, copper, term premium and mortgage spread are set to what they "
-                                 "typically did alongside those moves (12-month changes, 2008-09 and 2020 crisis "
-                                 "windows excluded). Off: they stay at zero.")
+FILL_MODES = {"supply": "Supply-driven oil (demand held at average)",
+              "history": "Historical mix (supply and demand)",
+              "off": "Off: other factors stay at zero"}
+FILL_MODE = st.sidebar.radio(
+    "Other factors in oil scenarios", list(FILL_MODES), format_func=FILL_MODES.get, key="oil_fill_mode",
+    on_change=_flag_reapply,
+    help="The oil model sets oil, CPI, breakevens, the 2y and the real yield. The other factors are set to what they "
+         "typically did alongside those moves (12-month changes, 2008-09 and 2020 crisis windows excluded). "
+         "Supply-driven holds copper and industrial production at their average, so an oil move is read as supply "
+         "(e.g. a war ending), not a global slowdown. Historical mix lets history decide, and history's big oil "
+         "drops were mostly demand slumps.")
+FILL_ON = FILL_MODE != "off"
 
 
 def _current_levels() -> dict:
@@ -171,11 +177,15 @@ if OM is not None:
         _S = SF.twelve_month_changes(ds.factors, FACTOR_KEYS, start=est_start)
         _spec = ["OIL", "CPI", "BREAKEVEN", "FED_EXPECT", "REAL_YIELD"]
         FILL_R2 = SF.explained_share(_S, _spec)
+        _hold = SF.DEMAND_KEYS if FILL_MODE == "supply" else ()
+        FILL_R2 = SF.explained_share(_S, _spec + [k for k in _hold if k in _S.columns])
         for _k in list(VIEWS_LIVE):
-            VIEWS_LIVE[_k], FILL_KEYS = SF.fill(VIEWS_LIVE[_k], _S)
-        _filled_txt = (" The other factors (credit, VIX, dollar, growth, copper, term premium, mortgage spread) are "
-                       "set to what they typically did alongside these moves (12-month changes since "
-                       f"{est_start.year}, crisis windows excluded).")
+            VIEWS_LIVE[_k], FILL_KEYS = SF.fill(VIEWS_LIVE[_k], _S, hold_average=_hold)
+        _filled_txt = (" Credit, VIX, the dollar, term premium and mortgage spread are set to what they typically did "
+                       f"alongside these moves (12-month changes since {est_start.year}, crisis windows excluded)"
+                       + ("; copper and industrial production are held at their average, so the oil move is read as "
+                          "supply-driven." if _hold else "; growth and copper are filled too (historical mix of "
+                          "supply and demand)."))
         VIEW_NOTES_LIVE = {k: v.replace(" Credit, VIX, dollar and growth are held flat because the oil model "
                                         "doesn't cover them.", _filled_txt) for k, v in VIEW_NOTES_LIVE.items()}
     if OV.staleness_months(OM) > 3:

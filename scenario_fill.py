@@ -36,16 +36,28 @@ def twelve_month_changes(factors: pd.DataFrame, keys: list[str], start=None,
     return S
 
 
-def fill(view: dict[str, float], S: pd.DataFrame, ridge: float = 1e-3) -> tuple[dict[str, float], list[str]]:
-    """Return (full view, list of filled keys). Specified values are kept exactly as given."""
+# Demand signals held at their average in "supply-driven" mode: an oil move with global demand unchanged
+# is read as a supply move (the identification idea behind demand/supply oil decompositions).
+DEMAND_KEYS = ("COPPER", "GROWTH")
+
+
+def fill(view: dict[str, float], S: pd.DataFrame, ridge: float = 1e-3,
+         hold_average: tuple[str, ...] = ()) -> tuple[dict[str, float], list[str]]:
+    """Return (full view, list of filled keys). Specified values are kept exactly as given.
+    `hold_average`: factors fixed at their average move (deviation 0) and conditioned on, not filled."""
     keys = list(S.columns)
+    view = dict(view)
+    for k in hold_average:
+        if k in keys and k not in view:
+            view[k] = 0.0
+    held = set(hold_average)
     spec = [k for k in keys if k in view]
     free = [k for k in keys if k not in view]
     if not spec or not free:
         return dict(view), []
     mu = S.mean()
     C = S.cov()
-    x = np.array([view[k] if k in ALREADY_DEVIATION else view[k] - mu[k] for k in spec])
+    x = np.array([view[k] if (k in ALREADY_DEVIATION or k in held) else view[k] - mu[k] for k in spec])
     Css = C.loc[spec, spec].to_numpy()
     Css = Css + ridge * np.diag(np.diag(Css))       # small ridge: oil, CPI and rates are correlated
     beta = C.loc[free, spec].to_numpy() @ np.linalg.solve(Css, x)
