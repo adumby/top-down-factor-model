@@ -46,7 +46,8 @@ SRC = "live" if src_label.startswith("Live") else "demo"
 
 
 @st.cache_data(ttl=6 * 3600, show_spinner="Downloading FRED and Yahoo Finance data...")
-def get_data(src: str) -> D.Dataset:
+def get_data(src: str, signature: tuple) -> D.Dataset:
+    # `signature` changes whenever factors/holdings change in config.py, which forces a fresh download
     return D.load(src)
 
 
@@ -54,14 +55,20 @@ if st.sidebar.button("Refresh data", help="Clear the cache and re-download"):
     get_data.clear()
 
 try:
-    ds = get_data(SRC)
+    ds = get_data(SRC, (tuple(FACTOR_KEYS), tuple(TICKERS), tuple(D.FRED_IDS)))
+except D.MissingDataError as exc:
+    st.error("**The model won't run on incomplete data.**\n\n" + str(exc) +
+             "\n\nThis is usually a temporary FRED or Yahoo outage: click **Refresh data** in the sidebar "
+             "in a few minutes. If one series keeps failing, check its ID on fred.stlouisfed.org.")
+    st.stop()
 except Exception as exc:
     st.error(f"Could not download live data: {type(exc).__name__}: {exc}\n\n"
              "Check your internet connection, or switch the data source to Demo in the sidebar.")
     st.stop()
 
+AVAILABLE = FACTOR_KEYS
 sel_keys = st.sidebar.multiselect(
-    "Factors in the model", FACTOR_KEYS, default=FACTOR_KEYS, format_func=lambda k: LABEL[k],
+    "Factors in the model", AVAILABLE, default=AVAILABLE, format_func=lambda k: LABEL[k],
     help="Fewer factors = more stable betas. Real yield, breakevens and the 2y yield move together, "
          "so check the VIF column in Diagnostics.")
 if not sel_keys:

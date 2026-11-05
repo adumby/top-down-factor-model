@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import io
 import os
-import pickle
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -47,10 +46,13 @@ def to_monthly_last(s: pd.Series) -> pd.Series:
 
 
 def build_factors(raw: dict[str, pd.Series]) -> pd.DataFrame:
+    """Factors whose FRED series are missing from `raw` are skipped (column left out)."""
     out = {}
     for f in FACTORS:
-        # "A-B" means the spread between two FRED series, each taken at month-end
-        parts = [to_monthly_last(raw[sid]) for sid in f.fred.split("-")]
+        ids = f.fred.split("-")          # "A-B" = spread between two series, each at month-end
+        if any(sid not in raw or raw[sid].dropna().empty for sid in ids):
+            continue
+        parts = [to_monthly_last(raw[sid]) for sid in ids]
         m = parts[0] if len(parts) == 1 else parts[0].sub(parts[1])
         if f.transform == "diff":
             out[f.key] = m.diff()
@@ -58,7 +60,7 @@ def build_factors(raw: dict[str, pd.Series]) -> pd.DataFrame:
             out[f.key] = np.log(m.where(m > 0)).diff() * 100.0
         else:
             raise ValueError(f.transform)
-    return pd.DataFrame(out)[FACTOR_KEYS]
+    return pd.DataFrame(out)[[k for k in FACTOR_KEYS if k in out]]
 
 
 def build_rf(tbill_annual_pct: pd.Series) -> pd.Series:
@@ -132,43 +134,66 @@ def fetch_prices(tickers: list[str], start: str = START) -> pd.DataFrame:
     return close.dropna(how="all")
 
 
+class MissingDataError(RuntimeError):
+    """Raised when any required series is missing or stale. The app refuses to run on partial data."""
+
+
+def check_complete(factors: pd.DataFrame, returns: pd.DataFrame, max_lag_months: int = 3,
+                   today: pd.Timestamp | None = None) -> list[str]:
+    """Return a list of problems (empty = OK): missing factors/holdings, or series that stopped updating."""
+    cur = (today or pd.Timestamp.today()).to_period("M")
+    problems = []
+    for f in FACTORS:
+        if f.key not in factors.columns or factors[f.key].dropna().empty:
+            problems.append(f"Factor '{f.label}' (FRED {f.fred}): no data")
+        else:
+            last = factors[f.key].dropna().index[-1]
+            if (cur - last).n > max_lag_months:
+                problems.append(f"Factor '{f.label}' (FRED {f.fred}): last data {last.strftime('%b %Y')}, stale")
+    for t in TICKERS:
+        if t == CASH:
+            continue
+        if t not in returns.columns or returns[t].dropna().empty:
+            problems.append(f"Holding {t}: no price data")
+        else:
+            last = returns[t].dropna().index[-1]
+            if (cur - last).n > max_lag_months:
+                problems.append(f"Holding {t}: last price {last.strftime('%b %Y')}, stale")
+    return problems
+
+
 def load_live() -> Dataset:
-    """Download everything, build monthly dataset, cache to disk. Falls back to the disk cache."""
-    cache = CACHE_DIR / "live_dataset.pkl"
+    """Download everything fresh. Raises MissingDataError if anything is missing: no partial runs,
+    no fallback to old cached data."""
+    raw, failed = {}, []
+    for sid in FRED_IDS:
+        try:
+            raw[sid] = fetch_fred(sid)
+        except Exception as exc:
+            failed.append(f"FRED {sid} ({type(exc).__name__})")
+    want = [t for t in TICKERS if t != CASH] + [p for a in ASSETS for p in a.proxy]
     try:
-        raw = {sid: fetch_fred(sid) for sid in FRED_IDS}
-        want = [t for t in TICKERS if t != CASH] + [p for a in ASSETS for p in a.proxy]
         prices = fetch_prices(sorted(set(want)))
-        missing = [t for t in want if t not in prices.columns or prices[t].dropna().empty]
+    except Exception as exc:
+        raise MissingDataError(f"Yahoo Finance download failed ({type(exc).__name__}: {exc})") from exc
+    if failed:
+        raise MissingDataError("Download failed for: " + "; ".join(failed))
 
-        factors = build_factors(raw)
-        rf = build_rf(raw[RF_FRED_ID])
-        rets_all = monthly_returns_from_prices(prices)
-        rets, used = splice_proxies(rets_all)
-        rets[CASH] = rf
+    factors = build_factors(raw)
+    rf = build_rf(raw[RF_FRED_ID])
+    rets_all = monthly_returns_from_prices(prices)
+    rets, used = splice_proxies(rets_all)
 
-        idx = factors.index.union(rets.index).union(rf.index)
-        factors, rets, rf = (x.reindex(idx) for x in (factors, rets, rf))
-        factors, rets, rf = (drop_incomplete_month(x) for x in (factors, rets, rf))
-        rf = rf.ffill()
-        rets[CASH] = rf
+    idx = factors.index.union(rets.index).union(rf.index)
+    factors, rets, rf = (x.reindex(idx) for x in (factors, rets, rf))
+    factors, rets, rf = (drop_incomplete_month(x) for x in (factors, rets, rf))
+    rf = rf.ffill()
+    rets[CASH] = rf
 
-        notes = []
-        if missing:
-            notes.append(f"No Yahoo data returned for: {', '.join(missing)}. These holdings are excluded "
-                         "from regressions until data is available.")
-        ds = Dataset(factors, rets[TICKERS], rf, "live", notes, used)
-        CACHE_DIR.mkdir(exist_ok=True)
-        with open(cache, "wb") as fh:
-            pickle.dump(ds, fh)
-        return ds
-    except Exception as exc:  # network down, API change, etc.
-        if cache.exists():
-            with open(cache, "rb") as fh:
-                ds = pickle.load(fh)
-            ds.notes = [f"Live download failed ({type(exc).__name__}); showing last cached data."] + ds.notes
-            return ds
-        raise
+    problems = check_complete(factors, rets)
+    if problems:
+        raise MissingDataError("Missing or stale data:\n- " + "\n- ".join(problems))
+    return Dataset(factors, rets[TICKERS], rf, "live", [], used)
 
 
 # --------------------------------------------------------------------------- #

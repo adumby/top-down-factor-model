@@ -11,7 +11,11 @@ streamlit run app.py
 ```
 
 It opens in the browser. The first load downloads about 20 years of data from FRED and Yahoo Finance
-(takes ~30 s) and caches it in `data_cache/`. Use **Demo (synthetic)** in the sidebar to try it offline.
+(takes ~30 s) and keeps it in memory for 6 hours. Use **Demo (synthetic)** in the sidebar to try it offline.
+
+**Strict data policy:** if any FRED series or ETF fails to download, or a series has stopped updating
+(no data in the last 3 months), the app stops and lists exactly what's missing. It never runs on partial
+or old cached data. Changing factors or holdings in `config.py` forces a fresh download.
 
 Optional: a free FRED API key (fred.stlouisfed.org > My Account > API Keys) makes downloads more reliable:
 
