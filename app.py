@@ -14,7 +14,7 @@ import streamlit as st
 import charts as C
 import data as D
 from config import (ASSETS, ASSET_BY_TICKER, CASH, EPISODES, FACTOR_BY_KEY, FACTOR_KEYS, FACTORS,
-                    PRESETS, TICKERS)
+                    PRESETS, TICKERS, VIEW_NOTES, VIEWS)
 from model import factor_diagnostics, fit_models
 from portfolio import (attribution, performance_stats, portfolio_betas, portfolio_returns,
                        risk_decomposition, rolling_ols, sim_stats, simulate, stress, to_fractions)
@@ -415,16 +415,21 @@ with tabs[3]:
         if p.startswith("Episode: "):
             a, b = EPISODES[p.removeprefix("Episode: ")]
             vals = ds.factors.loc[pd.Period(a, "M"):pd.Period(b, "M")].sum().to_dict()
+        elif p.startswith("12m view: "):
+            vals = VIEWS[p.removeprefix("12m view: ")]
         else:
             vals = PRESETS.get(p, {})
         for f in FACTORS:
             st.session_state[f"shock_{f.key}"] = float(round(vals.get(f.key, 0.0) / f.step) * f.step)
 
-    opts = list(PRESETS) + [f"Episode: {e}" for e in EPISODES]
+    opts = list(PRESETS) + [f"12m view: {v}" for v in VIEWS] + [f"Episode: {e}" for e in EPISODES]
     DEFAULT_PRESET = "Hawkish Fed surprise"
     st.session_state.setdefault("preset", DEFAULT_PRESET)
     st.selectbox("Scenario", opts, key="preset", on_change=_apply_preset,
                  help="Episodes use the actual cumulative factor moves from that period, applied as one shock.")
+    if st.session_state.preset.startswith("12m view: "):
+        st.info(VIEW_NOTES[st.session_state.preset.removeprefix("12m view: ")] +
+                " Applied here as the full 12-month move at once (total impact, no alpha or T-bill return).")
     for f in FACTORS:
         st.session_state.setdefault(f"shock_{f.key}", float(PRESETS[DEFAULT_PRESET].get(f.key, 0.0)))
 
@@ -484,7 +489,8 @@ with tabs[4]:
                 "add your macro view as a drift, and push them through the betas. Both allocations see the "
                 "same random paths.")
     c1, c2, c3, c4 = st.columns(4)
-    horizon = c1.slider("Horizon (months)", 1, 36, 12)
+    st.session_state.setdefault("horizon", 12)
+    horizon = c1.slider("Horizon (months)", 1, 36, key="horizon")
     nsim = c2.select_slider("Simulations", [1000, 2000, 5000, 10000], value=5000)
     volm = c3.slider("Volatility multiplier", 0.5, 3.0, 1.0, 0.1,
                      help=">1 = more turbulent than history (e.g. 1.5 for a stressed regime).")
@@ -494,13 +500,18 @@ with tabs[4]:
 
     def _apply_view():
         v = st.session_state.view_preset
-        vals = PRESETS.get(v, {})
+        vals = VIEWS.get(v, PRESETS.get(v, {}))
+        if v in VIEWS:
+            st.session_state["horizon"] = 12
         for f in FACTORS:
             st.session_state[f"view_{f.key}"] = float(vals.get(f.key, 0.0))
 
     with st.expander("Your macro view: expected total change in each factor over the horizon", expanded=True):
-        st.selectbox("Start from a scenario", list(PRESETS), key="view_preset", on_change=_apply_view,
+        st.selectbox("Start from a scenario", ["Custom (all zero)"] + list(VIEWS) +
+                     [p for p in PRESETS if p != "Custom (all zero)"], key="view_preset", on_change=_apply_view,
                      help="Treats a stress scenario as the expected total move over the horizon.")
+        if st.session_state.view_preset in VIEW_NOTES:
+            st.info(VIEW_NOTES[st.session_state.view_preset])
         vc = st.columns(4)
         for i, f in enumerate(FACTORS):
             st.session_state.setdefault(f"view_{f.key}", 0.0)
