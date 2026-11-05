@@ -18,10 +18,11 @@ import config as _config
 import charts as C
 import inflation as INF
 import oil_views as OV
+import scenario_fill as SF
 import data as D
 import model as _model
 import portfolio as _portfolio
-for _m in (_config, C, INF, OV, D, _model, _portfolio):
+for _m in (_config, C, INF, OV, SF, D, _model, _portfolio):
     importlib.reload(_m)
 
 from config import (ASSETS, ASSET_BY_TICKER, CASH, EPISODES, FACTOR_BY_KEY, FACTOR_KEYS, FACTORS,
@@ -139,6 +140,12 @@ OIL_RULE = st.sidebar.radio("Fed reaction in oil scenarios", list(OV.RULE_LABELS
                             key="oil_rule", on_change=_flag_reapply,
                             help="How the 2y and real yields respond in the oil-model scenarios. Core rule = what "
                                  "the Fed has done since 2016. Hawkish = the Fed doesn't look through energy.")
+FILL_ON = st.sidebar.toggle("Fill other factors with their historical co-movement", value=True, key="oil_fill",
+                            on_change=_flag_reapply,
+                            help="The oil model sets oil, CPI, breakevens, the 2y and the real yield. On: credit, VIX, "
+                                 "dollar, growth, copper, term premium and mortgage spread are set to what they "
+                                 "typically did alongside those moves (12-month changes, 2008-09 and 2020 crisis "
+                                 "windows excluded). Off: they stay at zero.")
 
 
 def _current_levels() -> dict:
@@ -159,6 +166,18 @@ if OM is not None:
     _cpi_avg = float(ds.factors["CPI"].loc[est_start:].mean()) if "CPI" in ds.factors else 0.0
     VIEWS_LIVE = OV.views(OM, OIL_RULE, _cpi_avg, CURRENT)
     VIEW_NOTES_LIVE = OV.notes(OM, OIL_RULE)
+    FILL_KEYS, FILL_R2 = [], None
+    if FILL_ON:
+        _S = SF.twelve_month_changes(ds.factors, FACTOR_KEYS, start=est_start)
+        _spec = ["OIL", "CPI", "BREAKEVEN", "FED_EXPECT", "REAL_YIELD"]
+        FILL_R2 = SF.explained_share(_S, _spec)
+        for _k in list(VIEWS_LIVE):
+            VIEWS_LIVE[_k], FILL_KEYS = SF.fill(VIEWS_LIVE[_k], _S)
+        _filled_txt = (" The other factors (credit, VIX, dollar, growth, copper, term premium, mortgage spread) are "
+                       "set to what they typically did alongside these moves (12-month changes since "
+                       f"{est_start.year}, crisis windows excluded).")
+        VIEW_NOTES_LIVE = {k: v.replace(" Credit, VIX, dollar and growth are held flat because the oil model "
+                                        "doesn't cover them.", _filled_txt) for k, v in VIEW_NOTES_LIVE.items()}
     if OV.staleness_months(OM) > 3:
         st.sidebar.warning(f"The oil-model export is from {OM.origin.strftime('%b %Y')}. Re-run it with new data "
                            "and upload a fresh export.")
@@ -751,11 +770,17 @@ with tabs[5]:
                 + ", ".join(f"{k} {v:.2f}" for k, v in CURRENT.items())) if CURRENT else \
             "Measured from the oil model's origin month."
         vt = pd.DataFrame({l: VIEWS_LIVE[l] for l in sel if l in VIEWS_LIVE}).T
-        vt = vt.rename(columns={"BREAKEVEN": "Breakeven (pp)", "FED_EXPECT": "2y (pp)", "REAL_YIELD": "Real yield (pp)",
-                                "CPI": "CPI vs average pace (pp)", "OIL": "Oil (%)"})
+        vt = vt[[k for k in FACTOR_KEYS if k in vt.columns]]
+        vt.columns = [f"{SHORT[k]} ({UNIT[k]})" + (" *" if k in FILL_KEYS else "") for k in vt.columns]
         st.dataframe(vt.style.format("{:+.2f}"), width="stretch")
-        st.caption(base + ". Credit, VIX, dollar, growth, copper, term premium and mortgage spread are held "
-                   "flat: the oil model doesn't cover them.")
+        if FILL_KEYS:
+            r2 = ", ".join(f"{SHORT[k]} {FILL_R2[k]:.0%}" for k in FILL_KEYS)
+            st.caption(base + ". **\\*** = filled with its typical co-movement, not from the oil model. How much "
+                       f"of each filled factor's 12-month moves the oil-model factors explain: {r2}. Low shares "
+                       "mean history doesn't pin that factor down, so its filled value is close to its average.")
+        else:
+            st.caption(base + ". Credit, VIX, dollar, growth, copper, term premium and mortgage spread are held "
+                       "flat (switch on 'Fill other factors' in the sidebar to use their typical co-movement).")
 
     # ================= extra check: second-wave test =================
     st.markdown("---")

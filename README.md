@@ -104,8 +104,15 @@ results from the `oil_model/` folder; `oil_views.py` turns each scenario into fa
 | Oil | % change in Brent |
 
 Moves are measured from the **latest actual levels** in this app's live data, so "$110 and holds" means
-+15% from today's Brent, not from the oil model's starting month. Credit, VIX, dollar, growth, copper,
-term premium and mortgage spread stay at zero because the oil model doesn't cover them.
++15% from today's Brent, not from the oil model's starting month.
+
+**The other 7 factors** (credit, VIX, dollar, growth, copper, term premium, mortgage spread) aren't in the
+oil model. With the sidebar switch *Fill other factors with their historical co-movement* on (default),
+`scenario_fill.py` sets each to its expected 12-month move given the oil model's five:
+E[f_u | f_s] = mean + Cov(u,s) Cov(s,s)⁻¹ (f_s − mean), estimated on overlapping 12-month factor changes
+from the "Estimate betas from" year, with windows touching 2008-09 or Feb-Jun 2020 left out so that falling
+yields don't import crash behaviour. The Inflation tab marks filled factors with * and shows how much of
+each one's moves the oil-model factors explain. Switch it off to keep them at zero.
 
 **Updating:** in the top-down-oil repo run `python -m oilinfl`, then `python scripts/export_for_factor_app.py`,
 and upload the 5 files in `factor_app_export/` to this repo's `oil_model/` folder. The sidebar warns when
