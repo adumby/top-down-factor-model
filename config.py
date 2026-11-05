@@ -100,7 +100,19 @@ FACTORS: list[Factor] = [
 
 FACTOR_KEYS = [f.key for f in FACTORS]
 FACTOR_BY_KEY = {f.key: f for f in FACTORS}
-FRED_IDS = sorted({sid for f in FACTORS for sid in f.fred.split("-")} | {RF_FRED_ID})
+# --------------------------------------------------------------------------- #
+# Inflation pass-through module (Inflation tab): oil level + price indexes (monthly)
+# --------------------------------------------------------------------------- #
+OIL_LEVEL_FRED = "DCOILBRENTEU"          # Brent spot, daily -> monthly average
+INFLATION_SERIES = {                     # key: (FRED id, label)
+    "PCE_H": ("PCEPI", "Headline PCE"),
+    "PCE_C": ("PCEPILFE", "Core PCE"),
+    "CPI_H": ("CPIAUCSL", "Headline CPI"),
+    "CPI_C": ("CPILFESL", "Core CPI"),
+}
+
+FRED_IDS = sorted({sid for f in FACTORS for sid in f.fred.split("-")} | {RF_FRED_ID, OIL_LEVEL_FRED}
+                  | {v[0] for v in INFLATION_SERIES.values()})
 
 
 # --------------------------------------------------------------------------- #
@@ -170,4 +182,8 @@ EPISODES: dict[str, tuple[str, str]] = {
     "2020 Covid crash (Feb - Mar 2020)": ("2020-02", "2020-03"),
     "2022 hiking cycle (Jan - Oct 2022)": ("2022-01", "2022-10"),
     "2023 regional bank stress (Mar 2023)": ("2023-03", "2023-03"),
+    "Oil: 2011 Libya spike (Feb - Apr 2011)": ("2011-02", "2011-04"),
+    "Oil: 2011-12 Brent holds above $100 (May 2011 - Jun 2012)": ("2011-05", "2012-06"),
+    "Oil: 2022 Ukraine spike (Feb - Jun 2022)": ("2022-02", "2022-06"),
+    "Oil: 2022 oil fades, Fed keeps hiking (Jul - Dec 2022)": ("2022-07", "2022-12"),
 }

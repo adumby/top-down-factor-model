@@ -16,10 +16,11 @@ import streamlit as st
 import importlib
 import config as _config
 import charts as C
+import inflation as INF
 import data as D
 import model as _model
 import portfolio as _portfolio
-for _m in (_config, C, D, _model, _portfolio):
+for _m in (_config, C, INF, D, _model, _portfolio):
     importlib.reload(_m)
 
 from config import (ASSETS, ASSET_BY_TICKER, CASH, EPISODES, FACTOR_BY_KEY, FACTOR_KEYS, FACTORS,
@@ -103,6 +104,36 @@ def get_model(src: str, keys: tuple, start: str, lags: int, _ds: D.Dataset):
 
 
 model = get_model(SRC, tuple(sel_keys), str(est_start), hac, ds)
+
+SIGNATURE = (tuple(FACTOR_KEYS), tuple(TICKERS), tuple(D.FRED_IDS))
+
+
+@st.cache_data(show_spinner="Estimating oil-to-inflation pass-through...")
+def get_inflation(src: str, signature: tuple, _ds: D.Dataset):
+    L = _ds.levels
+    if L is None:
+        return None
+    return {fam: INF.fit(L["BRENT"], L[f"{fam}_H"], L[f"{fam}_C"], fam) for fam in ("PCE", "CPI")}
+
+
+INFL = get_inflation(SRC, SIGNATURE, ds)
+LAST_BRENT = float(ds.levels["BRENT"].dropna().iloc[-1]) if ds.levels is not None else None
+
+
+def calibrate_views():
+    """Replace the judgment-based CPI value in each 12m view with the pass-through model's projection."""
+    out = {k: dict(v) for k, v in VIEWS.items()}
+    if INFL is None or "CPI" not in ds.factors.columns:
+        return out
+    avg = float(INFL["CPI"].head_mm.loc[est_start:].mean())   # same series and window as the CPI factor
+    for name, path in INF.view_paths(LAST_BRENT).items():
+        if name in out:
+            out[name]["CPI"] = round(INF.cpi_view_value(INFL["CPI"], path, hist_mean_mm=avg), 2)
+    return out
+
+
+VIEWS_LIVE = calibrate_views()
+CPI_NOTE = (" CPI move comes from the pass-through model (Inflation tab)." if INFL is not None else "")
 
 for n in ds.notes:
     st.sidebar.warning(n)
@@ -191,7 +222,7 @@ f_sd = model.factor_cov.values.diagonal() ** 0.5
 f_sd = pd.Series(f_sd, index=model.keys)
 hist = {k: portfolio_returns(ds.returns, w) for k, w in WEIGHTS.items()}       # (rp, W)
 
-tabs = st.tabs(["Overview", "History", "Exposures", "Stress test", "Forecast", "Diagnostics"])
+tabs = st.tabs(["Overview", "History", "Exposures", "Stress test", "Forecast", "Inflation", "Diagnostics"])
 
 # --------------------------------------------------------------------------- #
 # Overview
@@ -425,7 +456,7 @@ with tabs[3]:
             a, b = EPISODES[p.removeprefix("Episode: ")]
             vals = ds.factors.loc[pd.Period(a, "M"):pd.Period(b, "M")].sum().to_dict()
         elif p.startswith("12m view: "):
-            vals = VIEWS[p.removeprefix("12m view: ")]
+            vals = VIEWS_LIVE[p.removeprefix("12m view: ")]
         else:
             vals = PRESETS.get(p, {})
         for f in FACTORS:
@@ -437,7 +468,7 @@ with tabs[3]:
     st.selectbox("Scenario", opts, key="preset", on_change=_apply_preset,
                  help="Episodes use the actual cumulative factor moves from that period, applied as one shock.")
     if st.session_state.preset.startswith("12m view: "):
-        st.info(VIEW_NOTES[st.session_state.preset.removeprefix("12m view: ")] +
+        st.info(VIEW_NOTES[st.session_state.preset.removeprefix("12m view: ")] + CPI_NOTE +
                 " Applied here as the full 12-month move at once (total impact, no alpha or T-bill return).")
     for f in FACTORS:
         st.session_state.setdefault(f"shock_{f.key}", float(PRESETS[DEFAULT_PRESET].get(f.key, 0.0)))
@@ -509,7 +540,7 @@ with tabs[4]:
 
     def _apply_view():
         v = st.session_state.view_preset
-        vals = VIEWS.get(v, PRESETS.get(v, {}))
+        vals = VIEWS_LIVE.get(v, PRESETS.get(v, {}))
         if v in VIEWS:
             st.session_state["horizon"] = 12
         for f in FACTORS:
@@ -520,7 +551,7 @@ with tabs[4]:
                      [p for p in PRESETS if p != "Custom (all zero)"], key="view_preset", on_change=_apply_view,
                      help="Treats a stress scenario as the expected total move over the horizon.")
         if st.session_state.view_preset in VIEW_NOTES:
-            st.info(VIEW_NOTES[st.session_state.view_preset])
+            st.info(VIEW_NOTES[st.session_state.view_preset] + CPI_NOTE)
         vc = st.columns(4)
         for i, f in enumerate(FACTORS):
             st.session_state.setdefault(f"view_{f.key}", 0.0)
@@ -597,9 +628,140 @@ with tabs[4]:
                "crash risk unless you raise the volatility multiplier.")
 
 # --------------------------------------------------------------------------- #
-# Diagnostics
+# Inflation (oil pass-through)
 # --------------------------------------------------------------------------- #
 with tabs[5]:
+    if INFL is None:
+        st.info("Inflation data isn't loaded. Click Refresh data in the sidebar.")
+    else:
+        fam = st.radio("Inflation measure", ["PCE", "CPI"], horizontal=True,
+                       help="PCE is the Fed's target measure. CPI is what feeds the factor model's views.")
+        pt = INFL[fam]
+        st.markdown(f"Model of how oil (Brent, monthly average) feeds into **{fam}** inflation, estimated on "
+                    f"{pt.start.strftime('%b %Y')} to {pt.end.strftime('%b %Y')}. Oil moves count in two parts: "
+                    "every move, plus an extra term only when oil breaks to a **new 12-month high** "
+                    "(Hamilton's net oil price increase). A rise back to a level oil has already been at only "
+                    "gets the first part.")
+
+        # ---- 1. second-wave question
+        st.subheader("Does a second oil wave hit inflation less?")
+        imp = INF.impulse_comparison(pt)
+        pv = INF.new_high_pvalues(pt)
+        nh, bk = imp.loc["New 12-month high"], imp.loc["Back to an earlier level"]
+        m1, m2, m3 = st.columns(3)
+        m1.metric("+10% oil to a NEW high: headline after 12m", f"{nh['Headline after 12m']:+.2f} pp")
+        m2.metric("+10% oil BACK to an earlier level: headline after 12m", f"{bk['Headline after 12m']:+.2f} pp")
+        share = bk["Headline after 12m"] / nh["Headline after 12m"] if nh["Headline after 12m"] > 0 else np.nan
+        m3.metric("Second wave as a share of the first", "n/a" if pd.isna(share) else f"{share:.0%}")
+        if pv["headline"] < 0.05:
+            st.success(f"Yes. In the data, oil rising to a new high adds significantly more to headline {fam} "
+                       f"than the same rise back to an old level (p = {pv['headline']:.3f}). "
+                       f"Core: p = {pv['core']:.3f}" + (" (also significant)." if pv["core"] < 0.05 else
+                                                        " (not significant: core barely tells the two apart)."))
+        else:
+            st.warning(f"The data can't reliably tell the two apart for headline {fam} (p = {pv['headline']:.2f}). "
+                       "Treat the difference below as indicative.")
+        fig = go.Figure()
+        for lbl, color in (("New 12-month high", C.SERIES[2]), ("Back to an earlier level", C.SERIES[4])):
+            C.bars(fig, list(imp.columns), imp.loc[lbl].values, lbl, color)
+        C.finish(fig, f"Effect of a permanent +10% oil move on {fam} inflation (y/y, pp)", 360, ytitle="pp")
+        st.plotly_chart(fig, width="stretch", theme=None)
+        with st.expander("Estimated coefficients"):
+            for nm, res in (("Headline", pt.head), ("Core", pt.core)):
+                tbl = pd.DataFrame({"coef": res.params, "t-stat": res.tvalues})
+                st.markdown(f"**{nm} {fam}** (monthly inflation, %). R² {res.rsquared:.2f}, {int(res.nobs)} months")
+                st.dataframe(tbl.style.format({"coef": "{:+.4f}", "t-stat": "{:+.2f}"}), width="stretch")
+            st.caption("'trend' = average of the last 3 months of core inflation (persistence). Oil terms are in "
+                       "% moves of Brent. Newey-West standard errors.")
+
+        # ---- 2. scenario paths
+        st.subheader(f"{fam} inflation under each oil path")
+        H = 18
+        paths = INF.view_paths(LAST_BRENT, months=H)
+        with st.expander("Add a custom oil path"):
+            cc1, cc2, cc3 = st.columns(3)
+            use_custom = cc1.checkbox("Include custom path", value=False)
+            tgt = cc2.number_input("Brent target ($)", 30.0, 200.0, 100.0, 1.0)
+            ramp = cc3.slider("Months to get there", 1, 12, 3)
+            if use_custom:
+                paths[f"Custom: ${tgt:.0f} in {ramp}m, then holds"] = INF.custom_path(LAST_BRENT, tgt, ramp, H)
+        sel = st.multiselect("Paths", list(paths), default=list(paths))
+        pal = {n: c for n, c in zip(paths, [C.SERIES[3], C.SERIES[2], C.SERIES[6], C.SERIES[4]])}
+
+        @st.cache_data(show_spinner=False)
+        def _proj(src, signature, fam_, path_tuple):
+            return INF.project(INFL[fam_], np.array(path_tuple), n_sims=1000, seed=1)
+
+        res = {n: _proj(SRC, SIGNATURE, fam, tuple(np.round(paths[n], 4))) for n in sel}
+        hist_b = ds.levels["BRENT"].dropna().iloc[-24:]
+        c1, c2 = st.columns(2)
+        with c1:
+            fig = go.Figure()
+            C.line(fig, hist_b.index.to_timestamp(), hist_b.values, "Actual", C.INK2, fmt=".0f")
+            for n in sel:
+                r = res[n]
+                x = [hist_b.index[-1]] + list(r["path_index"])
+                y = [hist_b.iloc[-1]] + list(paths[n])
+                C.line(fig, pd.PeriodIndex(x).to_timestamp(), y, n, pal[n], dash="dot", fmt=".0f")
+            C.finish(fig, "Brent ($, monthly average)", 380, hover="x unified")
+            st.plotly_chart(fig, width="stretch", theme=None)
+        for col, key, title in ((c2, "head", f"Headline {fam}, y/y %"), (None, "core", f"Core {fam}, y/y %")):
+            fig = go.Figure()
+            first = res[sel[0]] if sel else None
+            if first is not None:
+                act = first[f"{key}_yoy"].loc[:first["last_actual"]].dropna().iloc[-24:]
+                C.line(fig, act.index.to_timestamp(), act.values, "Actual", C.INK2)
+                for n in sel:
+                    r = res[n]
+                    proj = r[f"{key}_yoy"].loc[r["last_actual"]:]
+                    C.line(fig, proj.index.to_timestamp(), proj.values, n, pal[n], dash="dot")
+            C.finish(fig, title, 380, hover="x unified")
+            if col is not None:
+                with col:
+                    st.plotly_chart(fig, width="stretch", theme=None)
+            else:
+                st.plotly_chart(fig, width="stretch", theme=None)
+
+        if sel:
+            rows = []
+            for n in sel:
+                r = res[n]
+                fi = r["path_index"]
+                a6, a12 = fi[5], fi[11]
+                rows.append({
+                    "Path": n,
+                    "Brent in 12m": paths[n][11],
+                    f"Headline now ({r['last_actual'].strftime('%b %y')})": r["head_yoy"].loc[r["last_actual"]],
+                    f"Headline {a6.strftime('%b %y')}": r["head_yoy"].loc[a6],
+                    f"Headline {a12.strftime('%b %y')}": r["head_yoy"].loc[a12],
+                    "Headline 12m range (10-90%)": f"{r['head_yoy_p10'].loc[a12]:.1f} to {r['head_yoy_p90'].loc[a12]:.1f}",
+                    f"Core {a12.strftime('%b %y')}": r["core_yoy"].loc[a12],
+                    "Core 12m range (10-90%)": f"{r['core_yoy_p10'].loc[a12]:.1f} to {r['core_yoy_p90'].loc[a12]:.1f}",
+                })
+            tb = pd.DataFrame(rows).set_index("Path")
+            num = [c for c in tb.columns if "range" not in c and c != "Brent in 12m"]
+            st.dataframe(tb.style.format({**{c: "{:.2f}%" for c in num}, "Brent in 12m": "${:.0f}"}),
+                         width="stretch")
+        st.caption(f"Starts from the last {fam} print and uses actual Brent for months already known. 'Now' is "
+                   "the last actual reading. The ranges add the model's historical month-to-month noise. "
+                   "Only oil drives these paths: wages, shelter, tariffs and demand are held at their recent trend, "
+                   "so treat them as the oil part of the inflation outlook, not a full forecast.")
+
+        # ---- 3. link to factor-model views
+        st.subheader("What this feeds into the 12-month views")
+        rows = []
+        for n in VIEWS:
+            rows.append({"View": n, "CPI move: my original judgment": VIEWS[n].get("CPI", np.nan),
+                         "CPI move: pass-through model (used now)": VIEWS_LIVE[n].get("CPI", np.nan)})
+        st.dataframe(pd.DataFrame(rows).set_index("View").style.format("{:+.2f}"), width="stretch")
+        st.caption("CPI factor = projected 12-month CPI inflation minus its historical average pace, in pp. "
+                   "The Stress test and Forecast tabs now use the model's number. Other factor moves in the "
+                   "views (2y, real yields, breakevens...) are still judgment.")
+
+# --------------------------------------------------------------------------- #
+# Diagnostics
+# --------------------------------------------------------------------------- #
+with tabs[6]:
     st.subheader("Factor checks")
     fd = factor_diagnostics(ds.factors.loc[est_start:], model.keys)
     fd.index = [LABEL[k] for k in fd.index]

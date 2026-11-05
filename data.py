@@ -16,7 +16,8 @@ import numpy as np
 import pandas as pd
 import requests
 
-from config import (ASSETS, CASH, FACTOR_KEYS, FACTORS, FRED_IDS, RF_FRED_ID, TICKERS)
+from config import (ASSETS, CASH, FACTOR_KEYS, FACTORS, FRED_IDS, INFLATION_SERIES, OIL_LEVEL_FRED,
+                    RF_FRED_ID, TICKERS)
 
 CACHE_DIR = Path(__file__).parent / "data_cache"
 START = "2003-12-01"
@@ -31,6 +32,7 @@ class Dataset:
     notes: list[str] = field(default_factory=list)
     proxy_used: dict[str, str] = field(default_factory=dict)   # ticker -> proxy ticker
     true_betas: pd.DataFrame | None = None                     # demo only (for testing)
+    levels: pd.DataFrame | None = None     # monthly BRENT (avg $) + price indexes (PCE_H, PCE_C, CPI_H, CPI_C)
 
 
 # --------------------------------------------------------------------------- #
@@ -61,6 +63,19 @@ def build_factors(raw: dict[str, pd.Series]) -> pd.DataFrame:
         else:
             raise ValueError(f.transform)
     return pd.DataFrame(out)[[k for k in FACTOR_KEYS if k in out]]
+
+
+def build_levels(raw: dict[str, pd.Series]) -> pd.DataFrame:
+    """Brent (monthly average) and the price-index levels used by the inflation module."""
+    out = {}
+    if OIL_LEVEL_FRED in raw:
+        b = raw[OIL_LEVEL_FRED].dropna().copy()
+        b.index = pd.to_datetime(b.index)
+        out["BRENT"] = b.groupby(b.index.to_period("M")).mean()
+    for key, (sid, _) in INFLATION_SERIES.items():
+        if sid in raw:
+            out[key] = to_monthly_last(raw[sid])
+    return pd.DataFrame(out)
 
 
 def build_rf(tbill_annual_pct: pd.Series) -> pd.Series:
@@ -162,6 +177,20 @@ def check_complete(factors: pd.DataFrame, returns: pd.DataFrame, max_lag_months:
     return problems
 
 
+def check_levels(levels: pd.DataFrame, max_lag_months: int = 3, today: pd.Timestamp | None = None) -> list[str]:
+    cur = (today or pd.Timestamp.today()).to_period("M")
+    problems = []
+    need = {"BRENT": f"Brent (FRED {OIL_LEVEL_FRED})"} | {k: f"{v[1]} (FRED {v[0]})" for k, v in INFLATION_SERIES.items()}
+    for k, label in need.items():
+        if k not in levels.columns or levels[k].dropna().empty:
+            problems.append(f"{label}: no data")
+        else:
+            last = levels[k].dropna().index[-1]
+            if (cur - last).n > max_lag_months:
+                problems.append(f"{label}: last data {last.strftime('%b %Y')}, stale")
+    return problems
+
+
 def load_live() -> Dataset:
     """Download everything fresh. Raises MissingDataError if anything is missing: no partial runs,
     no fallback to old cached data."""
@@ -190,10 +219,12 @@ def load_live() -> Dataset:
     rf = rf.ffill()
     rets[CASH] = rf
 
-    problems = check_complete(factors, rets)
+    levels = drop_incomplete_month(build_levels(raw))
+
+    problems = check_complete(factors, rets) + check_levels(levels)
     if problems:
         raise MissingDataError("Missing or stale data:\n- " + "\n- ".join(problems))
-    return Dataset(factors, rets[TICKERS], rf, "live", [], used)
+    return Dataset(factors, rets[TICKERS], rf, "live", [], used, levels=levels)
 
 
 # --------------------------------------------------------------------------- #
@@ -275,7 +306,49 @@ def make_demo(seed: int = 7, start: str = "2007-01", end: str = "2026-10") -> Da
     f.iloc[0] = np.nan
     return Dataset(f, rets, rf, "demo",
                    ["Synthetic data generated from known betas. For testing the app only: not real markets."],
-                   {}, betas)
+                   {}, betas, levels=make_demo_levels(seed, start, end))
+
+
+# Known pass-through used to generate demo inflation (so the inflation module can be validated)
+DEMO_PT = {
+    "core": {"const": 0.08, "trend": 0.55, "oil chg, months 1-6": 0.002, "oil chg, months 7-12": 0.001,
+             "new high, months 0-6": 0.004, "new high, months 7-12": 0.002},
+    "head": {"const": 0.02, "trend": 0.90, "oil chg, month 0": 0.030, "oil chg, month 1": 0.012,
+             "oil chg, month 2": 0.004, "oil chg, months 3-12": 0.001,
+             "new high, month 0": 0.020, "new high, month 1": 0.010, "new high, month 2": 0.004},
+    "core_sd": 0.07, "head_sd": 0.10,
+}
+
+
+def make_demo_levels(seed: int = 7, start: str = "2007-01", end: str = "2026-10",
+                     pre: int = 36) -> pd.DataFrame:
+    """Brent: mean-reverting log price with occasional spikes. Inflation: generated from DEMO_PT."""
+    from inflation import core_design, head_design, oil_terms
+    rng = np.random.default_rng(seed + 101)
+    idx = pd.period_range(pd.Period(start, "M") - pre, end, freq="M")
+    n = len(idx)
+    lo = np.empty(n); lo[0] = np.log(70)
+    for t in range(1, n):
+        spike = rng.choice([0.0, 0.18, -0.18], p=[0.94, 0.03, 0.03])
+        lo[t] = lo[t - 1] + 0.04 * (np.log(80) - lo[t - 1]) + rng.normal(0, 0.07) + spike
+    brent = pd.Series(np.exp(lo), index=idx)
+    brent *= 95.0 / brent.iloc[-1]
+    ot = oil_terms(brent)
+    d, N = ot["d"].fillna(0), ot["N"].fillna(0)
+    cm = pd.Series(0.18, index=idx); hm = pd.Series(0.20, index=idx)
+    pc, ph = DEMO_PT["core"], DEMO_PT["head"]
+    for i in range(15, n):
+        t = idx[i]
+        xc = core_design(cm, d, N).loc[t]
+        cm.iloc[i] = pc["const"] + sum(pc[k] * xc[k] for k in pc if k != "const") + rng.normal(0, DEMO_PT["core_sd"])
+        xh = head_design(cm, d, N).loc[t]
+        hm.iloc[i] = ph["const"] + sum(ph[k] * xh[k] for k in ph if k != "const") + rng.normal(0, DEMO_PT["head_sd"])
+    lvl = lambda m: 100.0 * np.exp(m.cumsum() / 100.0)
+    cpi_h = hm * 1.15 + rng.normal(0, 0.04, n)
+    cpi_c = cm * 1.12 + rng.normal(0, 0.03, n)
+    out = pd.DataFrame({"BRENT": brent, "PCE_H": lvl(hm), "PCE_C": lvl(cm),
+                        "CPI_H": lvl(cpi_h), "CPI_C": lvl(cpi_c)})
+    return out.loc[pd.Period(start, "M") - 24:]
 
 
 def load(source: str) -> Dataset:

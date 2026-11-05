@@ -35,6 +35,7 @@ Tests: `python -m pytest -q`
 | Exposures | Beta of every holding to every factor (colored by t-stat), R², alpha, rolling betas per holding. |
 | Stress test | Move the factor sliders (or pick a scenario / a historical episode) and see the one-month hit by holding and by factor. |
 | Forecast | Monte Carlo over 1 to 36 months. Enter your macro view (e.g. 2y yield -0.75 pp over 12 months), raise the volatility multiplier for a stressed regime. |
+| Inflation | Oil → inflation pass-through (PCE and CPI). Answers "does a second oil wave hit inflation less than the first?", projects headline and core inflation under the three oil paths (or your own), and feeds the CPI move into the 12-month views. |
 | Diagnostics | Stationarity (ADF), collinearity (VIF), factor correlations, raw factor history, Excel export. |
 
 ## The model
@@ -86,3 +87,18 @@ regression singular. The existing three rate factors already capture curve moves
   but a real-time backtest should use ALFRED vintages.
 - **Monte Carlo uses normal distributions**, so it understates crash risk. Use the volatility multiplier and
   the stress tab for tails.
+
+## Inflation module (`inflation.py`)
+
+Monthly headline and core inflation are regressed on Brent moves split into two parts:
+every move (`d`), plus Hamilton's **net oil price increase** (`N`), which is non-zero only when Brent
+breaks above its highest level of the past 12 months. A rise back to a level oil has already seen gets
+only the `d` effect, so the model measures how much smaller a "second wave" is. Core inflation also
+carries its own 3-month trend (persistence), and headline follows core's trend.
+
+The scenario paths start from the last inflation print, use actual Brent for months already known, and
+simulate forward with the model's historical noise (10-90% ranges). Only oil drives the paths: wages,
+shelter and demand stay at their recent trend, so read them as the oil part of the outlook.
+
+The CPI move in each 12-month oil view (Stress test / Forecast) is now taken from this model instead of
+judgment. Extra FRED series: DCOILBRENTEU, PCEPI, PCEPILFE, CPILFESL (strict mode applies to them too).
